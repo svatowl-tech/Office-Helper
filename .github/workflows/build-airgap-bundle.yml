@@ -19,11 +19,11 @@ jobs:
       - name: "1. Клонирование репозитория"
         uses: actions/checkout@v4
 
-      - name: "2. Установка кросс-компиляторов (Mingw-w64 Win32 для Windows 7 и Static Toolchain для Astra Linux)"
+      - name: "2. Установка кросс-компиляторов (Mingw-w64 POSIX Threads для Windows 7 и Static Toolchain для Astra Linux)"
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git curl zip unzip xz-utils \
-            mingw-w64-x86-64-dev gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32
+            mingw-w64-x86-64-dev gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
 
       - name: "3. Сборка фронтенда (dist) и автономного серверного бандла (dist-server/server.cjs)"
         uses: actions/setup-node@v4
@@ -40,7 +40,7 @@ jobs:
       - name: "4. Компиляция НАТИВНЫХ лаунчеров (в обход блокировок .bat, cmd.exe и .sh)"
         run: |
           # 1) Нативный графический .EXE лаунчер для Windows 7/10/11 (использует прямые вызовы Win32 CreateProcessW без cmd.exe)
-          x86_64-w64-mingw32-gcc-win32 -O2 -mwindows \
+          x86_64-w64-mingw32-gcc-posix -O2 -mwindows -static \
             server/native-launcher.c \
             -o dist-airgap/Office-Assistant.exe \
             -lshell32 -luser32 -lkernel32
@@ -63,15 +63,15 @@ jobs:
           cp /tmp/llama-cpp/build-linux/bin/llama-server dist-airgap/bin/linux-x64/llama-server
           chmod +x dist-airgap/bin/linux-x64/llama-server
 
-      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601, без прав администратора)"
+      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601, POSIX Threads, статическая линковка)"
         run: |
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \
             -DCMAKE_SYSTEM_NAME=Windows \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-win32 \
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-win32 \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
             -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601" \
             -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
           cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j$(nproc)
