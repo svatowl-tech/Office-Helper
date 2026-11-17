@@ -108,12 +108,16 @@ int main(int argc, char *argv[]) {
         selfPath[len] = '\0';
         char *lastSlash = strrchr(selfPath, '/');
         if (lastSlash) *lastSlash = '\0';
-        chdir(selfPath);
+        if (chdir(selfPath) != 0) {
+            perror("Не удалось перейти в рабочую директорию");
+        }
     } else if (argv[0]) {
         char *lastSlash = strrchr(argv[0], '/');
         if (lastSlash) {
             *lastSlash = '\0';
-            chdir(argv[0]);
+            if (chdir(argv[0]) != 0) {
+                perror("Не удалось перейти в рабочую директорию");
+            }
         }
     }
 
