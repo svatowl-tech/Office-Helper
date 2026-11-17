@@ -40,14 +40,16 @@ jobs:
       - name: "4. Компиляция НАТИВНЫХ лаунчеров (в обход блокировок .bat, cmd.exe и .sh)"
         run: |
           # 1) Нативный графический .EXE лаунчер для Windows 7/10/11 (использует прямые вызовы Win32 CreateProcessW без cmd.exe)
-          x86_64-w64-mingw32-gcc-win32 -O2 -mwindows -municode \
+          x86_64-w64-mingw32-gcc-win32 -O2 -mwindows \
             server/native-launcher.c \
-            -o dist-airgap/Офисный-Помощник.exe \
+            -o dist-airgap/Office-Assistant.exe \
             -lshell32 -luser32 -lkernel32
+          cp dist-airgap/Office-Assistant.exe "dist-airgap/Офисный-Помощник.exe"
 
           # 2) Нативный статический ELF-бинарник для Astra Linux (использует прямой вызов ядра execv без /bin/sh)
-          gcc -O2 -static server/native-launcher.c -o dist-airgap/Офисный-Помощник-AstraLinux.run
-          chmod +x dist-airgap/Офисный-Помощник-AstraLinux.run
+          gcc -O2 -static server/native-launcher.c -o dist-airgap/Office-Assistant-AstraLinux.run
+          chmod +x dist-airgap/Office-Assistant-AstraLinux.run
+          cp dist-airgap/Office-Assistant-AstraLinux.run "dist-airgap/Офисный-Помощник-AstraLinux.run"
 
       - name: "5. Компиляция llama-server для Astra Linux (ядро 5.3/5.4, SSE4.2, статическая линковка без зависимостей)"
         run: |
