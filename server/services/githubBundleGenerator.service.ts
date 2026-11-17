@@ -64,7 +64,7 @@ jobs:
         with:
           node-version: '22'
       - run: |
-          npm install --no-audit --no-fund
+          npm install --legacy-peer-deps --no-audit --no-fund
           npm run build
           mkdir -p dist-airgap/bin/linux-x64
           mkdir -p dist-airgap/bin/win7-x64
