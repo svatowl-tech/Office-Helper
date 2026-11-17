@@ -62,9 +62,9 @@ jobs:
       - name: "3. Сборка фронтенда и серверного ядра Харнеса"
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - run: |
-          npm ci
+          npm install --no-audit --no-fund
           npm run build
           mkdir -p dist-airgap/bin/linux-x64
           mkdir -p dist-airgap/bin/win7-x64
