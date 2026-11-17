@@ -1,11 +1,47 @@
-<div align="center">
+# Офисный помощник — Автономная коррекция русского языка в документах (Air-Gap Portable)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Автономная система проверки и исправления русского языка в офисных документах **Word (`.docx`)**, **Excel (`.xlsx`)** и **PowerPoint (`.pptx`)** с **100% сохранением исходного оформления, таблиц, шрифтов и макетов**.
 
-  <h1>Built with AI Studio</h2>
+---
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## Защита от блокировок `.bat` и `.sh` (3 независимых способа запуска)
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+На многих офисных компьютерах групповыми политиками безопасности (GPO / AppLocker в Windows или мандатным контролем / `noexec` в Astra Linux) запрещен запуск командной строки `cmd.exe`, пакетных файлов `.bat` и шелл-скриптов `.sh`.
 
-</div>
+Поэтому сборщик GitHub Actions автоматически создает внутри релизного архива **три независимых контура запуска**:
+
+### Способ 1 (Основной): Нативные исполняемые программы без участия `.bat`, `cmd.exe` и `/bin/sh`
+Сборщик компилирует файл `server/native-launcher.c` в чистый машинный код:
+- **Для Windows 7 / 8.1 / 10 / 11:** **`Офисный-Помощник.exe`** — нативное графическое Win32-приложение (`WinMain`), которое вызывает ядро Windows напрямую (`CreateProcessW` и `ShellExecuteW`), не вызывая `cmd.exe` и не открывая черных консольных окон. Самостоятельно прописывает в памяти процесса флаг `NODE_SKIP_PLATFORM_CHECK=1` для совместимости с Windows 7 SP1.
+- **Для Astra Linux (ядро 5.3 / 5.4):** **`Офисный-Помощник-AstraLinux.run`** — статически скомпилированный ELF-бинарник (`gcc -static`), который запускает сервер через системный вызов `execv` напрямую в ядро Linux, вообще не обращаясь к `/bin/sh` или `bash`.
+
+### Способ 2 (Если заблокированы вообще любые `.exe` и бинарники): Запуск через обычный браузер (`Офисный-Помощник-Автономный.html`)
+Если на рабочей станции запрещен запуск любых сторонних `.exe` файлов с флешки или Рабочего стола:
+- Просто дважды кликните по файлу **`Офисный-Помощник-Автономный.html`**.
+- Он откроется в любом штатном браузере (**Яндекс.Браузер, Chromium-Gost, Firefox, Chrome, Edge**) напрямую по локальному протоколу `file://` без запуска каких-либо серверных процессов и без интернета.
+
+### Способ 3 (Если в системе уже есть Python или Node, а бинарники на флешке заблокированы `noexec`):
+В Astra Linux при монтировании USB-флешки с флагом `noexec` ядро запрещает прямой запуск бинарников, но разрешает передавать файл системному интерпретатору:
+```bash
+node dist-server/server.cjs
+```
+При этом сам сервер `dist-server/server.cjs` теперь умеет самостоятельно поднимать локальную нейросеть `llama-server` и автоматически открывать браузер через `rundll32 url.dll,FileProtocolHandler` (Windows) или `xdg-open` (Linux) без помощи `.bat`/`.sh`.
+
+---
+
+## Как получить готовый самодостаточный архив на GitHub
+
+Отправьте проект в ваш репозиторий на GitHub:
+```bash
+git init
+git add .
+git commit -m "Portable Air-Gap Office Assistant with Native C Launchers and HTML Fallback"
+git branch -M main
+git remote add origin https://github.com/<ВАШ_ЛОГИН>/<ВАШ_РЕПОЗИТОРИЙ>.git
+git push -u origin main
+```
+
+GitHub Actions автоматически соберет всё и опубликует в разделе **Releases**:
+- `office-assistant-ru-portable-airgap.zip` (полный архив с `Офисный-Помощник.exe`, `Офисный-Помощник-AstraLinux.run`, `Офисный-Помощник-Автономный.html`, моделями `SAGE-FRED-T5` и `Qwen2.5-1.5B-GGUF`)
+- `office-assistant-ru-astra-linux-portable.tar.gz`
+- `Офисный-Помощник-Автономный.html` (отдельный файл для мгновенного запуска в браузере)

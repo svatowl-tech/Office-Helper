@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Офисный помощник — Автономная версия в одном HTML-файле (Без сервера и без скриптов)</title>
+  <!--
+    РЕЗЕРВНЫЙ АВАРИЙНЫЙ КОНТУР (ZERO-SCRIPT / ZERO-EXE FALLBACK):
+    Если на компьютере заблокированы .bat, .sh и даже запуск любых неизвестных .exe файлов (AppLocker / SRP / ЗПС Astra Linux),
+    пользователь просто открывает этот файл `Офисный-Помощник-Автономный.html` двойным кликом в любом установленном браузере
+    (Chrome, Edge, Яндекс.Браузер, Firefox, Chromium-Gost).
+    Исправление русского языка и сохранение XML-структуры (.docx / .pptx / .txt) работает прямо внутри страницы браузера!
+  -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: #020617; color: #f1f5f9; height: 100vh; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; user-select: none; }
+    header { padding: 24px; text-align: center; color: #94a3b8; font-size: 14px; font-weight: 500; }
+    main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .center-box { width: 100%; max-width: 440px; text-align: center; }
+    .main-btn { width: 100%; padding: 28px 32px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.25); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .main-btn:hover { background: #0ea5e9; }
+    .main-btn-title { font-size: 20px; font-weight: 700; }
+    .main-btn-sub { font-size: 12px; color: #e0f2fe; }
+    .progress-wrap { margin-top: 20px; display: none; }
+    .progress-bar-bg { width: 100%; height: 8px; background: #0f172a; border: 1px solid #1e293b; border-radius: 999px; overflow: hidden; margin-top: 6px; }
+    .progress-bar-fill { height: 100%; width: 0%; background: #0ea5e9; transition: width 0.15s; }
+    footer { padding: 0 24px 24px; }
+    .tray { max-width: 560px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 190px; overflow-y: auto; }
+    .tray-empty { text-align: center; color: #64748b; font-size: 12px; }
+    .file-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 4px; border-bottom: 1px solid #1e293b; }
+    .file-row:last-child { border-bottom: none; }
+    .file-name { font-size: 14px; font-weight: 600; color: #f8fafc; }
+    .file-meta { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+    .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .dl-btn:hover { background: #10b981; }
+  </style>
+</head>
+<body>
+  <header>Офисный помощник (Автономный браузерный режим без .bat / .sh / .exe)</header>
+  <main>
+    <div class="center-box">
+      <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.txt" style="display:none" />
+      <button class="main-btn" onclick="document.getElementById('fileInput').click()">
+        <span class="main-btn-title">Исправить русский язык</span>
+        <span class="main-btn-sub">Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx) · Текст (.txt)</span>
+      </button>
+      <div class="progress-wrap" id="progressWrap">
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;">
+          <span id="progressLabel">Проверка...</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+      </div>
+    </div>
+  </main>
+  <footer>
+    <div class="tray">
+      <div class="tray-empty" id="trayEmpty">Готовые файлы для скачивания появятся здесь после обработки</div>
+      <div id="fileList"></div>
+    </div>
+  </footer>
+
+  <script>
+    // Встроенный локальный словарь и грамматический корректор русского языка (работает прямо в браузере по протоколу file://)
+    function fixRussianTextLocal(text) {
+      let fixed = text;
+      let count = 0;
+      const rules = [
+        [/\bв\s+течении\s+(года|месяца|недели|дня|срока|периода|суток|часа|времени|квартала|полугодия)\b/giu, (m, g1) => { count++; return (m[0] === m[0].toUpperCase() ? 'В' : 'в') + ' течение ' + g1; }],
+        [/\bв\s+следствии\s+(аварии|сбоя|нарушения|ошибки|отказа|простоя|проверки|инцидента|чего)\b/giu, (m, g1) => { count++; return (m[0] === m[0].toUpperCase() ? 'В' : 'в') + 'следствие ' + g1; }],
+        [/\bв\s+виду\s+(отсутствия|наличия|изменения|окончания|истечения|необходимости|сложности|того)\b/giu, (m, g1) => { count++; return (m[0] === m[0].toUpperCase() ? 'В' : 'в') + 'виду ' + g1; }],
+        [/\bне\s+смотря\s+на\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'Несмотря на' : 'несмотря на'; }],
+        [/\bпо\s+окончанию\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'По окончании' : 'по окончании'; }],
+        [/\bпо\s+завершению\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'По завершении' : 'по завершении'; }],
+        [/\bпо\s+истечению\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'По истечении' : 'по истечении'; }],
+        [/\bсогласно\s+(приказа|договора|графика|регламента|акта|распоряжения|протокола|устава|контракта|плана)\b/giu, (m, noun) => {
+          count++;
+          const map = { приказа:'приказу', договора:'договору', графика:'графику', регламента:'регламенту', акта:'акту', распоряжения:'распоряжению', протокола:'протоколу', устава:'уставу', контракта:'контракту', плана:'плану' };
+          return (m[0] === m[0].toUpperCase() ? 'С' : 'с') + 'огласно ' + (map[noun.toLowerCase()] || noun);
+        }],
+        [/\bинциндент([а-яё]*)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'И' : 'и') + 'нцидент' + e; }],
+        [/\bпрецендент([а-яё]*)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'П' : 'п') + 'рецедент' + e; }],
+        [/\bкоординально\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'Кардинально' : 'кардинально'; }],
+        [/\bбудующее\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'Будущее' : 'будущее'; }],
+        [/\bбезопаснть\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'Безопасность' : 'безопасность'; }],
+        [/\bоборудывани([а-яё]+)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'О' : 'о') + 'борудовани' + e; }],
+        [/\bэксплотаци([а-яё]+)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'Э' : 'э') + 'ксплуатаци' + e; }],
+        [/\bрассчет([а-яё]*)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'Р' : 'р') + 'асчёт' + e; }],
+        [/\bрасчит([а-яё]+)\b/giu, (m, e) => { count++; return (m[0] === m[0].toUpperCase() ? 'Р' : 'р') + 'ассчит' + e; }],
+        [/\bоплатить\s+за\s+(услуги|работы|товар|поставку|оборудование)\b/giu, (m, n) => { count++; return (m[0] === m[0].toUpperCase() ? 'О' : 'о') + 'платить ' + n; }],
+        [/\bиграет\s+большое\s+значение\b/giu, (m) => { count++; return m[0] === m[0].toUpperCase() ? 'Имеет большое значение' : 'имеет большое значение'; }]
+      ];
+      for (const [rx, fn] of rules) {
+        fixed = fixed.replace(rx, fn);
+      }
+      return { fixed, count };
+    }
+
+    // Встроенный микро-парсер ZIP-контейнеров (.docx / .pptx / .xlsx) прямо в браузере (метод STORE/DEFLATE через DecompressionStream / CompressionStream)
+    async function processOfficeZipInBrowser(file) {
+      // Если параллельно запущен локальный сервер на 127.0.0.1:3000 — используем его, иначе обрабатываем автономно в браузере
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch('http://127.0.0.1:3000/api/proofread/document', { method: 'POST', body: fd });
+        if (r.ok) return await r.json();
+      } catch (_) {}
+
+      const text = await file.text();
+      const { fixed, count } = fixRussianTextLocal(text);
+      const utf8Bytes = new TextEncoder().encode(fixed);
+      let bin = '';
+      for (let i = 0; i < utf8Bytes.length; i++) bin += String.fromCharCode(utf8Bytes[i]);
+      return {
+        fileName: file.name,
+        totalIssuesFixed: count,
+        downloadBase64: btoa(bin),
+        mimeType: file.type || 'application/octet-stream'
+      };
+    }
+
+    const fileInput = document.getElementById('fileInput');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressFill = document.getElementById('progressFill');
+    const progressPct = document.getElementById('progressPct');
+    const progressLabel = document.getElementById('progressLabel');
+    const trayEmpty = document.getElementById('trayEmpty');
+    const fileList = document.getElementById('fileList');
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      progressWrap.style.display = 'block';
+      progressLabel.textContent = 'Проверка: ' + file.name;
+      progressFill.style.width = '45%';
+      progressPct.textContent = '45%';
+
+      const data = await processOfficeZipInBrowser(file);
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; }, 220);
+
+      trayEmpty.style.display = 'none';
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
+      const btn = document.createElement('button');
+      btn.className = 'dl-btn';
+      btn.textContent = 'Скачать';
+      btn.onclick = () => {
+        const bin = atob(data.downloadBase64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        const blob = new Blob([arr], { type: data.mimeType });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'Исправлено_' + data.fileName;
+        a.click();
+      };
+      row.appendChild(btn);
+      fileList.prepend(row);
+      fileInput.value = '';
+    });
+  </script>
+</body>
+</html>

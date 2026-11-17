@@ -1,0 +1,131 @@
+name: "Build & Release Portable Air-Gap Office Assistant (Astra Linux 5.3/5.4 + Windows 7+)"
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release-portable:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: "1. Клонирование репозитория"
+        uses: actions/checkout@v4
+
+      - name: "2. Установка кросс-компиляторов (Mingw-w64 Win32 для Windows 7 и Static Toolchain для Astra Linux)"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git curl zip unzip xz-utils \
+            mingw-w64-x86-64-dev gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32
+
+      - name: "3. Сборка фронтенда (dist) и автономного серверного бандла (dist-server/server.cjs)"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: |
+          npm ci
+          npm run build
+          mkdir -p dist-airgap/bin/linux-x64
+          mkdir -p dist-airgap/bin/win7-x64
+          mkdir -p dist-airgap/models/sage-95m
+          mkdir -p dist-airgap/tessdata
+
+      - name: "4. Компиляция НАТИВНЫХ лаунчеров (в обход блокировок .bat, cmd.exe и .sh)"
+        run: |
+          # 1) Нативный графический .EXE лаунчер для Windows 7/10/11 (использует прямые вызовы Win32 CreateProcessW без cmd.exe)
+          x86_64-w64-mingw32-gcc-win32 -O2 -mwindows -municode \
+            server/native-launcher.c \
+            -o dist-airgap/Офисный-Помощник.exe \
+            -lshell32 -luser32 -lkernel32
+
+          # 2) Нативный статический ELF-бинарник для Astra Linux (использует прямой вызов ядра execv без /bin/sh)
+          gcc -O2 -static server/native-launcher.c -o dist-airgap/Офисный-Помощник-AstraLinux.run
+          chmod +x dist-airgap/Офисный-Помощник-AstraLinux.run
+
+      - name: "5. Компиляция llama-server для Astra Linux (ядро 5.3/5.4, SSE4.2, статическая линковка без зависимостей)"
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
+          cmake -B /tmp/llama-cpp/build-linux -S /tmp/llama-cpp \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+          cmake --build /tmp/llama-cpp/build-linux --target llama-server -j$(nproc)
+          cp /tmp/llama-cpp/build-linux/bin/llama-server dist-airgap/bin/linux-x64/llama-server
+          chmod +x dist-airgap/bin/linux-x64/llama-server
+
+      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601, без прав администратора)"
+        run: |
+          cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-win32 \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-win32 \
+            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601" \
+            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
+          cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j$(nproc)
+          cp /tmp/llama-cpp/build-win7/bin/llama-server.exe dist-airgap/bin/win7-x64/llama-server.exe
+
+      - name: "7. Вшивание портативных бинарников Node.js LTS (запуск из папки без установки в систему)"
+        run: |
+          curl -L --retry 5 "https://nodejs.org/dist/v18.20.4/node-v18.20.4-linux-x64.tar.xz" -o /tmp/node-linux.tar.xz
+          tar -xf /tmp/node-linux.tar.xz -C /tmp
+          cp /tmp/node-v18.20.4-linux-x64/bin/node dist-airgap/bin/linux-x64/node
+          chmod +x dist-airgap/bin/linux-x64/node
+
+          curl -L --retry 5 "https://nodejs.org/dist/v18.20.4/win-x64/node.exe" -o dist-airgap/bin/win7-x64/node.exe
+
+      - name: "8. Загрузка и включение в пакет локальных русских нейросетей (SAGE FRED-T5 + Qwen2.5-1.5B GGUF) и OCR словарей"
+        run: |
+          curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/config.json" -o dist-airgap/models/sage-95m/config.json
+          curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/pytorch_model.bin" -o dist-airgap/models/sage-95m/pytorch_model.bin
+          curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/tokenizer.json" -o dist-airgap/models/sage-95m/tokenizer.json
+          curl -L --retry 5 "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" -o dist-airgap/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+          curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata" -o dist-airgap/tessdata/rus.traineddata
+          curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -o dist-airgap/tessdata/eng.traineddata
+
+      - name: "9. Формирование полностью автономного пакета (3 способа запуска: Нативный EXE/ELF, HTML без EXE, и Скрипты)"
+        run: |
+          cp -r dist dist-server Офисный-Помощник-Автономный.html start-astra-linux.sh start-windows7.bat README.md dist-airgap/
+          chmod +x dist-airgap/start-astra-linux.sh
+          cd dist-airgap && zip -r9 ../office-assistant-ru-portable-airgap.zip . && cd ..
+          tar -czf office-assistant-ru-astra-linux-portable.tar.gz -C dist-airgap .
+
+      - name: "10. Выгрузка готового архива в GitHub Actions Artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-assistant-ru-portable-airgap
+          path: |
+            office-assistant-ru-portable-airgap.zip
+            office-assistant-ru-astra-linux-portable.tar.gz
+          retention-days: 90
+
+      - name: "11. Автоматическое создание GitHub Release с прикрепленными архивами для скачивания"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: "Офисный помощник (Portable Air-Gap Release #${{ github.run_number }})"
+          body: |
+            ### Полностью автономный пакет с 3 независимыми контурами запуска (даже при блокировке `.bat` и `.sh`)
+            В состав архива включены:
+            1. **`Офисный-Помощник.exe` (Windows 7/10/11) и `Офисный-Помощник-AstraLinux.run` (Astra Linux 5.3/5.4)** — нативные скомпилированные C-лаунчеры, которые запускают приложение напрямую через системные вызовы ядра (`CreateProcessW` / `execv`), **полностью обходя блокировки `cmd.exe`, `.bat`, PowerShell и `/bin/sh`**.
+            2. **`Офисный-Помощник-Автономный.html`** — резервная однофайловая версия, которая открывается двойным кликом в любом браузере по протоколу `file://` даже там, где заблокирован запуск вообще любых `.exe` файлов.
+            3. **`start-windows7.bat` / `start-astra-linux.sh`** — классические консольные скрипты.
+            4. Вшитые локальные нейросети русского языка (`ai-forever/sage-fredt5-distilled-95m` + `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`) и словари `rus.traineddata`.
+          files: |
+            office-assistant-ru-portable-airgap.zip
+            office-assistant-ru-astra-linux-portable.tar.gz
+            Офисный-Помощник-Автономный.html
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

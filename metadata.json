@@ -1,0 +1,6 @@
+{
+  "name": "Автономный Офисный Харнес (Air-Gap Edition)",
+  "description": "Автономная кроссплатформенная система для Astra Linux (ядро 5.3/5.4) и Windows 7+: коррекция русского языка в DOCX/XLSX с сохранением форматирования, локальный OCR, сетевой менеджмент и конструктор оффлайн-бандла GitHub Actions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
