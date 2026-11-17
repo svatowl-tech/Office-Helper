@@ -84,7 +84,7 @@ jobs:
 
       - name: "5. Кросс-компиляция llama-server.exe специально под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601)"
         run: |
-          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::CreateFile2\\s*\\(\\s*wpath\\.c_str\\(\\)\\s*,\\s*GENERIC_READ\\s*,\\s*FILE_SHARE_READ\\s*,\\s*OPEN_EXISTING\\s*,\\s*nullptr\\s*\\)', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)', re.sub(r'#\\s*error\\s*\\\\?\\s*\\n?\\s*\"cpp-httplib doesn.t support Windows 8 or lower[^\"]*\"', '// Win7 patch', open(p).read()))) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
+          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::CreateFile2\\s*\\([^;]+?\\)', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)', re.sub(r'#\\s*error\\s*\\\\?\\s*\\n?\\s*\"cpp-httplib doesn.t support Windows 8 or lower[^\"]*\"', '// Win7 patch', open(p).read()), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \\
             -DCMAKE_SYSTEM_NAME=Windows \\
             -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\

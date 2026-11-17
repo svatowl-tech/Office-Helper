@@ -66,7 +66,7 @@ jobs:
       - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (Патч cpp-httplib CreateFileW + POSIX Threads + Static)"
         run: |
           # Патчим cpp-httplib в llama.cpp: убираем искусственную блокировку Windows 7 (#error)
-          # и заменяем вызов Windows 8 API ::CreateFile2(...) на классический Windows 7 API ::CreateFileW(...)
+          # и заменяем многострочный вызов Windows 8 API ::CreateFile2(...) на классический Windows 7 API ::CreateFileW(...)
           python3 - << 'EOF'
           import glob, re
 
@@ -76,11 +76,12 @@ jobs:
               # 1. Отключаем директиву #error "cpp-httplib doesn't support Windows 8 or lower..."
               code = re.sub(r'#\s*error\s+[^\n]*Windows 8 or lower[^\n]*', '// Windows 7 SP1 compatibility patch applied', code)
               code = re.sub(r'#\s*error\s*\\\s*\n\s*"cpp-httplib doesn\'t support Windows 8 or lower[^"]*"', '// Windows 7 SP1 compatibility patch applied', code)
-              # 2. Заменяем ::CreateFile2(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, nullptr) на CreateFileW для Windows 7
+              # 2. Заменяем любой (в т.ч. многострочный) вызов ::CreateFile2(...) на ::CreateFileW(...) для Windows 7
               code = re.sub(
-                  r'::CreateFile2\s*\(\s*wpath\.c_str\(\)\s*,\s*GENERIC_READ\s*,\s*FILE_SHARE_READ\s*,\s*OPEN_EXISTING\s*,\s*nullptr\s*\)',
+                  r'::CreateFile2\s*\([^;]+?\)',
                   '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)',
-                  code
+                  code,
+                  flags=re.DOTALL
               )
               with open(p, 'w', encoding='utf-8') as f:
                   f.write(code)
