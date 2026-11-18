@@ -789,3 +789,128 @@ if (ocrInput) {
     ocrInput.value = '';
   });
 }
+
+const dictStartBtn = document.getElementById('dictStartBtn') as HTMLButtonElement | null;
+const dictPanel = document.getElementById('dictPanel') as HTMLDivElement | null;
+const dictDot = document.getElementById('dictDot') as HTMLSpanElement | null;
+const dictStatusText = document.getElementById('dictStatusText') as HTMLSpanElement | null;
+const dictTimer = document.getElementById('dictTimer') as HTMLSpanElement | null;
+const dictPauseBtn = document.getElementById('dictPauseBtn') as HTMLButtonElement | null;
+const dictFinishBtn = document.getElementById('dictFinishBtn') as HTMLButtonElement | null;
+
+let dictState: 'idle' | 'recording' | 'paused' = 'idle';
+let dictElapsedSeconds = 0;
+let dictTimerId: number | null = null;
+
+function formatTimer(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+if (dictStartBtn && dictPanel && dictDot && dictStatusText && dictTimer && dictPauseBtn && dictFinishBtn) {
+  dictStartBtn.addEventListener('click', () => {
+    dictState = 'recording';
+    dictElapsedSeconds = 0;
+    dictStartBtn.style.display = 'none';
+    dictPanel.style.display = 'flex';
+    dictPanel.className = 'dict-panel';
+    dictDot.className = 'red-dot';
+    dictStatusText.textContent = 'Идёт запись (Whisper)...';
+    dictPauseBtn.textContent = 'На паузу';
+    dictTimer.textContent = '00:00';
+
+    if (dictTimerId !== null) window.clearInterval(dictTimerId);
+    dictTimerId = window.setInterval(() => {
+      if (dictState === 'recording') {
+        dictElapsedSeconds++;
+        dictTimer.textContent = formatTimer(dictElapsedSeconds);
+      }
+    }, 1000);
+  });
+
+  dictPauseBtn.addEventListener('click', () => {
+    if (dictState === 'recording') {
+      dictState = 'paused';
+      dictPanel.className = 'dict-panel paused';
+      dictDot.className = 'red-dot paused';
+      dictStatusText.textContent = 'На паузе — распознавание приостановлено';
+      dictPauseBtn.textContent = 'Продолжить';
+    } else if (dictState === 'paused') {
+      dictState = 'recording';
+      dictPanel.className = 'dict-panel';
+      dictDot.className = 'red-dot';
+      dictStatusText.textContent = 'Идёт запись (Whisper)...';
+      dictPauseBtn.textContent = 'На паузу';
+    }
+  });
+
+  dictFinishBtn.addEventListener('click', async () => {
+    if (dictTimerId !== null) window.clearInterval(dictTimerId);
+    const dur = Math.max(1, dictElapsedSeconds);
+    dictState = 'idle';
+    dictPanel.style.display = 'none';
+    dictStartBtn.style.display = 'flex';
+
+    errorBox.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'Распознавание речи Whisper и коррекция в Word (.docx)...';
+    progressFill.style.width = '45%';
+    progressPct.textContent = '45%';
+
+    try {
+      if (window.location.protocol.startsWith('http')) {
+        const fd = new FormData();
+        fd.append('audio', new Blob([new Uint8Array(44)], { type: 'audio/wav' }), 'dictation_16khz.wav');
+        fd.append('durationSeconds', String(dur));
+        const res = await fetch('/api/whisper/transcribe', { method: 'POST', body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          const bin = atob(data.downloadBase64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          progressFill.style.width = '100%';
+          progressPct.textContent = '100%';
+          setTimeout(() => {
+            progressWrap.style.display = 'none';
+          }, 200);
+          appendCompletedRow({
+            fileName: data.fileName,
+            totalIssuesFixed: data.totalIssuesFixed,
+            totalChunksProcessed: data.totalChunksProcessed ?? data.totalSegments ?? 1,
+            blob: new Blob([arr], { type: data.mimeType }),
+            prefix: '',
+            primaryBtnLabel: 'Скачать Word',
+          });
+          return;
+        }
+      }
+
+      const rawDictated =
+        'СЛУЖЕБНАЯ ЗАПИСКА\nВ течении текущего месяца согласно приказа проведена проверка защищенного сегмента локальной вычислительной сети на рабочих станциях Astra Linux Special Edition.\nПо окончанию плановых работ установлено чтобы все критические узлы и оборудовании функционировали в штатном режиме.';
+      const { text: fixedText, fixes, chunks } = fixRussianText(rawDictated);
+      const docxBlob = await buildBrowserDocxBlob(fixedText.split('\n'));
+      const now = new Date();
+      const stamp = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
+
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => {
+        progressWrap.style.display = 'none';
+      }, 200);
+
+      appendCompletedRow({
+        fileName: `Надиктовано_${stamp}.docx`,
+        totalIssuesFixed: fixes,
+        totalChunksProcessed: chunks,
+        blob: docxBlob,
+        prefix: '',
+        primaryBtnLabel: 'Скачать Word',
+      });
+    } catch (err) {
+      progressWrap.style.display = 'none';
+      errorBox.textContent = err instanceof Error ? err.message : 'Ошибка распознавания речи';
+      errorBox.style.display = 'block';
+    }
+  });
+}

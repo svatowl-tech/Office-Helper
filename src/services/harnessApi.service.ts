@@ -76,6 +76,29 @@ export async function apiLoadSampleOcrPdf(
   return res.json();
 }
 
+export async function apiTranscribeWhisperAudio(
+  wavBlob: Blob,
+  durationSeconds: number,
+  clientTranscriptHint?: string
+): Promise<DocumentProofreadResult> {
+  const formData = new FormData();
+  formData.append('audio', wavBlob, 'dictation_16khz.wav');
+  formData.append('durationSeconds', String(Math.max(1, Math.round(durationSeconds))));
+  if (clientTranscriptHint && clientTranscriptHint.trim().length > 0) {
+    formData.append('clientTranscriptHint', clientTranscriptHint.trim());
+  }
+
+  const res = await fetch('/api/whisper/transcribe', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Ошибка распознавания речи Whisper' }));
+    throw new Error(err.error || 'Ошибка распознавания речи Whisper');
+  }
+  return res.json();
+}
+
 export async function apiLoadSampleDocument(
   type: 'docx' | 'xlsx'
 ): Promise<DocumentProofreadResult & { originalSampleBase64: string }> {

@@ -61,7 +61,7 @@ export interface DocumentProofreadResult {
   segments: DocumentSegment[];
   downloadBase64: string;
   mimeType: string;
-  operationMode?: 'proofread' | 'ocr';
+  operationMode?: 'proofread' | 'ocr' | 'dictation';
   sourceFileName?: string;
   secondaryFileName?: string;
   secondaryDownloadBase64?: string;

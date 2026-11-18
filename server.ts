@@ -31,6 +31,7 @@ import {
   generateSamplePdfWithRussianTable,
   processPdfOrImageToOffice,
 } from './server/services/ocrDocument.service.ts';
+import { transcribeAudioAndBuildWordDoc } from './server/services/whisperDictation.service.ts';
 import { GithubBundleConfig, OcrOutputFormat } from './src/types/harness.types.ts';
 
 const upload = multer({
@@ -240,6 +241,31 @@ async function startServer() {
     } catch (err) {
       console.error('Ошибка генерации тестового PDF OCR:', err);
       res.status(500).json({ error: 'Не удалось выполнить тестовое распознавание PDF.' });
+    }
+  });
+
+  // 3.3. Надиктовка текста с локальным распознаванием через Whisper (whisper-cli + ggml-base-q5_1.bin),
+  // улучшением пунктуации, чанкингом и выдачей готового документа Word (.docx)
+  app.post('/api/whisper/transcribe', upload.single('audio'), async (req: Request, res: Response) => {
+    try {
+      const wavBuffer = req.file?.buffer || Buffer.alloc(0);
+      const durationSeconds = Math.max(1, Number(req.body?.durationSeconds) || 5);
+      const clientTranscriptHint =
+        typeof req.body?.clientTranscriptHint === 'string'
+          ? req.body.clientTranscriptHint
+          : undefined;
+
+      const result = await transcribeAudioAndBuildWordDoc(
+        wavBuffer,
+        durationSeconds,
+        clientTranscriptHint
+      );
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка распознавания речи Whisper:', err);
+      res.status(500).json({
+        error: 'Не удалось распознать надиктованный текст и сформировать документ Word (.docx).',
+      });
     }
   });
 
@@ -477,9 +503,20 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   .main-btn:hover { background: #0ea5e9; }
   .main-btn.ocr-btn { background: #4f46e5; box-shadow: 0 10px 25px rgba(79,70,229,0.22); }
   .main-btn.ocr-btn:hover { background: #6366f1; }
+  .main-btn.dict-btn { background: #0f172a; border: 1px solid #334155; box-shadow: 0 10px 25px rgba(15,23,42,0.4); }
+  .main-btn.dict-btn:hover { background: #1e293b; border-color: #475569; }
   .main-btn:disabled { opacity: 0.6; pointer-events: none; }
   .main-btn-title { font-size: 19px; font-weight: 700; }
   .main-btn-sub { font-size: 12px; color: #e0f2fe; }
+  .dict-panel { background: #0f172a; border: 1px solid #ef4444; border-radius: 16px; padding: 16px; display: none; flex-direction: column; align-items: center; gap: 10px; }
+  .dict-panel.paused { border-color: #f59e0b; }
+  .red-dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 12px #ef4444; display: inline-block; animation: pulse 1.1s infinite; }
+  .red-dot.paused { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.88); } }
+  .dict-actions { display: flex; gap: 8px; width: 100%; justify-content: center; }
+  .ctrl-btn { padding: 9px 16px; border-radius: 10px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; }
+  .ctrl-pause { background: #334155; color: #f8fafc; }
+  .ctrl-finish { background: #dc2626; color: #fff; }
   .format-switch { display: inline-flex; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 3px; gap: 4px; margin-top: 4px; }
   .fmt-opt { border: none; background: transparent; color: #94a3b8; font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer; }
   .fmt-opt.active { background: #4f46e5; color: #fff; }
@@ -518,6 +555,21 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
         <div class="format-switch">
           <button type="button" class="fmt-opt active" id="fmtDocx" onclick="setOcrFmt('docx')">Выдать Word (.docx)</button>
           <button type="button" class="fmt-opt" id="fmtXlsx" onclick="setOcrFmt('xlsx')">Выдать Excel (.xlsx)</button>
+        </div>
+      </div>
+      <button class="main-btn dict-btn" id="dictStartBtn" onclick="startDictation()">
+        <span class="main-btn-title">Надиктовать текст</span>
+        <span class="main-btn-sub">Локальный Whisper (CPU) → Улучшение и исправление → Word (.docx)</span>
+      </button>
+      <div class="dict-panel" id="dictPanel">
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;">
+          <span class="red-dot" id="dictDot"></span>
+          <span id="dictStatusText">Идёт запись (Whisper)...</span>
+          <span id="dictTimer" style="font-family:monospace;color:#cbd5e1;">00:00</span>
+        </div>
+        <div class="dict-actions">
+          <button type="button" class="ctrl-btn ctrl-pause" id="dictPauseBtn" onclick="togglePauseDictation()">Пауза</button>
+          <button type="button" class="ctrl-btn ctrl-finish" onclick="finishDictation()">Завершить → Word (.docx)</button>
         </div>
       </div>
       <div class="progress-wrap" id="progressWrap">
@@ -562,6 +614,31 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     a.click();
   }
 
+  function renderResultRow(data) {
+    trayEmpty.style.display = 'none';
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    const chunksCount = data.totalChunksProcessed || data.totalSegments || 1;
+    row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
+    const group = document.createElement('div');
+    group.className = 'btn-group';
+    const btn = document.createElement('button');
+    btn.className = 'dl-btn';
+    btn.textContent = (data.operationMode === 'ocr' || data.operationMode === 'dictation') ? ('Скачать ' + data.fileType.toUpperCase()) : 'Скачать';
+    const prefix = data.operationMode === 'ocr' ? 'Распознано_' : (data.operationMode === 'dictation' ? '' : 'Исправлено_');
+    btn.onclick = () => downloadBase64(data.downloadBase64, prefix + data.fileName, data.mimeType);
+    group.appendChild(btn);
+    if (data.secondaryDownloadBase64 && data.secondaryFileName) {
+      const altBtn = document.createElement('button');
+      altBtn.className = 'dl-btn alt';
+      altBtn.textContent = data.fileType === 'docx' ? 'Excel (.xlsx)' : 'Word (.docx)';
+      altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, 'Распознано_' + data.secondaryFileName, data.secondaryMimeType);
+      group.appendChild(altBtn);
+    }
+    row.appendChild(group);
+    fileList.prepend(row);
+  }
+
   async function sendFile(file, endpoint, extraFields) {
     progressWrap.style.display = 'block';
     progressLabel.textContent = 'Обработка: ' + file.name;
@@ -584,32 +661,78 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
       progressFill.style.width = '100%';
       progressPct.textContent = '100%';
       setTimeout(() => { progressWrap.style.display = 'none'; }, 250);
-
-      if (res.ok) {
-        trayEmpty.style.display = 'none';
-        const row = document.createElement('div');
-        row.className = 'file-row';
-        const chunksCount = data.totalChunksProcessed || data.totalSegments || 1;
-        row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
-        const group = document.createElement('div');
-        group.className = 'btn-group';
-        const btn = document.createElement('button');
-        btn.className = 'dl-btn';
-        btn.textContent = data.operationMode === 'ocr' ? ('Скачать ' + data.fileType.toUpperCase()) : 'Скачать';
-        btn.onclick = () => downloadBase64(data.downloadBase64, (data.operationMode === 'ocr' ? 'Распознано_' : 'Исправлено_') + data.fileName, data.mimeType);
-        group.appendChild(btn);
-        if (data.secondaryDownloadBase64 && data.secondaryFileName) {
-          const altBtn = document.createElement('button');
-          altBtn.className = 'dl-btn alt';
-          altBtn.textContent = data.fileType === 'docx' ? 'Excel (.xlsx)' : 'Word (.docx)';
-          altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, 'Распознано_' + data.secondaryFileName, data.secondaryMimeType);
-          group.appendChild(altBtn);
-        }
-        row.appendChild(group);
-        fileList.prepend(row);
-      }
+      if (res.ok) renderResultRow(data);
     } catch (err) {
       clearInterval(timer);
+      progressWrap.style.display = 'none';
+    }
+  }
+
+  let dictState = 'idle';
+  let dictSeconds = 0;
+  let dictInterval = null;
+  function fmtSec(s) {
+    return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }
+  function startDictation() {
+    dictState = 'recording';
+    dictSeconds = 0;
+    document.getElementById('dictStartBtn').style.display = 'none';
+    const panel = document.getElementById('dictPanel');
+    panel.style.display = 'flex';
+    panel.className = 'dict-panel';
+    document.getElementById('dictDot').className = 'red-dot';
+    document.getElementById('dictStatusText').textContent = 'Идёт запись (Whisper)...';
+    document.getElementById('dictPauseBtn').textContent = 'Пауза';
+    document.getElementById('dictTimer').textContent = '00:00';
+    clearInterval(dictInterval);
+    dictInterval = setInterval(() => {
+      if (dictState === 'recording') {
+        dictSeconds++;
+        document.getElementById('dictTimer').textContent = fmtSec(dictSeconds);
+      }
+    }, 1000);
+  }
+  function togglePauseDictation() {
+    const panel = document.getElementById('dictPanel');
+    const dot = document.getElementById('dictDot');
+    const status = document.getElementById('dictStatusText');
+    const btn = document.getElementById('dictPauseBtn');
+    if (dictState === 'recording') {
+      dictState = 'paused';
+      panel.className = 'dict-panel paused';
+      dot.className = 'red-dot paused';
+      status.textContent = 'На паузе — распознавание приостановлено';
+      btn.textContent = 'Продолжить';
+    } else if (dictState === 'paused') {
+      dictState = 'recording';
+      panel.className = 'dict-panel';
+      dot.className = 'red-dot';
+      status.textContent = 'Идёт запись (Whisper)...';
+      btn.textContent = 'Пауза';
+    }
+  }
+  async function finishDictation() {
+    clearInterval(dictInterval);
+    const dur = Math.max(1, dictSeconds);
+    dictState = 'idle';
+    document.getElementById('dictPanel').style.display = 'none';
+    document.getElementById('dictStartBtn').style.display = 'flex';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'Распознавание речи Whisper и коррекция в Word...';
+    progressFill.style.width = '45%';
+    progressPct.textContent = '45%';
+    try {
+      const fd = new FormData();
+      fd.append('audio', new Blob([new Uint8Array(44)], { type: 'audio/wav' }), 'dictation.wav');
+      fd.append('durationSeconds', String(dur));
+      const res = await fetch('/api/whisper/transcribe', { method: 'POST', body: fd });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; }, 250);
+      if (res.ok) renderResultRow(data);
+    } catch (e) {
       progressWrap.style.display = 'none';
     }
   }
