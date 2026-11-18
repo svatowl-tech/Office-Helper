@@ -63,7 +63,7 @@ jobs:
             -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \`
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \`
             -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \`
-            ${simdFlags} -DGGML_WIN_VER=0x0A00
+            ${simdFlags}
           cmake --build build-win8plus --config Release --target llama-server --parallel
           \$exe = Get-ChildItem -Path build-win8plus -Filter "llama-server.exe" -Recurse | Select-Object -First 1
           Copy-Item \$exe.FullName -Destination "llama-server-win8plus-unmodified.exe" -Force
@@ -118,15 +118,16 @@ jobs:
 
       - run: cp llama-server-win8plus-unmodified.exe dist-airgap/bin/win8plus-x64/llama-server.exe
 
-      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (GGML_WIN_VER=0x0601 + CreateFileW)"
+      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601 + CreateFileW/CreateFileMappingW/MapViewOfFile)"
         run: |
-          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#\\s*error\\s*\\\\?\\s*\\n?\\s*\"cpp-httplib doesn.t support Windows 8 or lower[^\"]*\"', '// Win7 patch', open(p).read()), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
+          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::MapViewOfFileFromApp\\s*\\([^;]*?\\)\\s*;', '::MapViewOfFile(hMapping_, FILE_MAP_READ, 0, 0, 0);', re.sub(r'::CreateFileMappingFromApp\\s*\\([^;]*?\\)\\s*;', '::CreateFileMappingW(hFile_, NULL, PAGE_READONLY, static_cast<DWORD>(size.HighPart), static_cast<DWORD>(size.LowPart), NULL);', re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#if\\s+defined\\s*\\(\\s*_WIN32_WINNT\\s*\\)\\s*&&\\s*_WIN32_WINNT\\s*<\\s*0x0A00\\b.*?#endif', '// Win7 patch', open(p).read(), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \\
             -DCMAKE_SYSTEM_NAME=Windows \\
             -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \\
             -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \\
-            -DGGML_WIN_VER=0x0601 \\
+            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601" \\
+            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601" \\
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
             -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
             ${simdFlags}
