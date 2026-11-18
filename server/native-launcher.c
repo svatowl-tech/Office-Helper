@@ -134,6 +134,13 @@ int main(int argc, char *argv[]) {
     };
 
     execv("./bin/linux-x64/node", nodeArgs);
+    // Резервный запуск системного node (если локальный бинарник заблокирован политикой ЗПС Astra Linux «Усиленный»)
+    char *sysNodeArgs[] = {
+        "node",
+        "./dist-server/server.cjs",
+        NULL
+    };
+    execvp("node", sysNodeArgs);
     perror("Ошибка запуска ./bin/linux-x64/node");
     return 1;
 }

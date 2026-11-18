@@ -48,8 +48,34 @@ permissions:
   contents: write
 
 jobs:
+  build-win8plus-unmodified:
+    runs-on: windows-latest
+    steps:
+      - name: "1. Клонирование оригинального llama.cpp (без модификаций)"
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama-cpp
+
+      - name: "2. Нативная сборка llama-server.exe (MSVC /MT static)"
+        shell: pwsh
+        run: |
+          cmake -B build-win8plus -S llama-cpp \`
+            -DCMAKE_BUILD_TYPE=Release \`
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \`
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \`
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \`
+            ${simdFlags} -DGGML_WIN_VER=0x0A00
+          cmake --build build-win8plus --config Release --target llama-server --parallel
+          \$exe = Get-ChildItem -Path build-win8plus -Filter "llama-server.exe" -Recurse | Select-Object -First 1
+          Copy-Item \$exe.FullName -Destination "llama-server-win8plus-unmodified.exe" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win8plus-unmodified-bin
+          path: llama-server-win8plus-unmodified.exe
+
   build-airgap-all-in-one:
     runs-on: ubuntu-22.04
+    needs: [build-win8plus-unmodified]
     steps:
       - name: "1. Checkout исходного кода Харнеса"
         uses: actions/checkout@v4
@@ -72,35 +98,27 @@ jobs:
 
       - name: "4. Компиляция llama-server для Astra Linux 1.7.11 (musl static, AVX2 для Core i3-9100 + SSE4.2)"
         run: |
-          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp
           mkdir -p dist-airgap/bin/linux-x64-avx2 dist-airgap/bin/win8plus-x64
           docker run --rm -v /tmp/llama-cpp:/llama -v "\${{ github.workspace }}/dist-airgap:/out" alpine:3.20 sh -c '
-            apk add --no-cache build-base cmake linux-headers && \
-            cmake -B /tmp/build-sse -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \
-            cmake --build /tmp/build-sse --target llama-server -j$(nproc) && \
-            cp /tmp/build-sse/bin/llama-server /out/bin/linux-x64/llama-server && \
-            cmake -B /tmp/build-avx2 -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \
-            cmake --build /tmp/build-avx2 --target llama-server -j$(nproc) && \
+            apk add --no-cache build-base cmake linux-headers && \\
+            cmake -B /tmp/build-sse -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
+            cmake --build /tmp/build-sse --target llama-server -j$(nproc) && \\
+            cp /tmp/build-sse/bin/llama-server /out/bin/linux-x64/llama-server && \\
+            cmake -B /tmp/build-avx2 -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
+            cmake --build /tmp/build-avx2 --target llama-server -j$(nproc) && \\
             cp /tmp/build-avx2/bin/llama-server /out/bin/linux-x64-avx2/llama-server
           '
 
-      - name: "5. Кросс-компиляция llama-server.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11"
-        run: |
-          cmake -B /tmp/llama-cpp/build-win8plus -S /tmp/llama-cpp \\
-            -DCMAKE_SYSTEM_NAME=Windows \\
-            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \\
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \\
-            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00" \\
-            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0A00" \\
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
-            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
-            ${simdFlags}
-          cmake --build /tmp/llama-cpp/build-win8plus --target llama-server -j\$(nproc)
-          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe dist-airgap/bin/win8plus-x64/llama-server.exe
-          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe llama-server-win8plus-unmodified.exe
+      - name: "5. Подключение нативной сборки llama-server.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11"
+        uses: actions/download-artifact@v4
+        with:
+          name: win8plus-unmodified-bin
+          path: .
 
-      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601 + CreateFileW)"
+      - run: cp llama-server-win8plus-unmodified.exe dist-airgap/bin/win8plus-x64/llama-server.exe
+
+      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (GGML_WIN_VER=0x0601 + CreateFileW)"
         run: |
           python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#\\s*error\\s*\\\\?\\s*\\n?\\s*\"cpp-httplib doesn.t support Windows 8 or lower[^\"]*\"', '// Win7 patch', open(p).read()), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \\
@@ -108,8 +126,7 @@ jobs:
             -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \\
             -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \\
-            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601" \\
-            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \\
+            -DGGML_WIN_VER=0x0601 \\
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
             -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
             ${simdFlags}

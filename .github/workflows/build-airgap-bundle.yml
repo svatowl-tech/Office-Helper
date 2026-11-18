@@ -13,13 +13,56 @@ permissions:
   contents: write
 
 jobs:
+  build-win8plus-unmodified:
+    name: "Сборка llama-server.exe без модификаций (Windows 8+ / 10 / 11)"
+    runs-on: windows-latest
+    steps:
+      - name: "1. Клонирование оригинального llama.cpp (без патчей)"
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama-cpp
+
+      - name: "2. Нативная сборка llama-server.exe (MSVC /MT static, SSE4.2, Windows SDK)"
+        shell: pwsh
+        run: |
+          cmake -B build-win8plus -S llama-cpp `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_OPENMP=OFF `
+            -DLLAMA_CURL=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DLLAMA_BUILD_UI=OFF `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF -DGGML_SSE42=ON `
+            -DGGML_WIN_VER=0x0A00
+          cmake --build build-win8plus --config Release --target llama-server --parallel
+
+          $builtExe = Get-ChildItem -Path build-win8plus -Filter "llama-server.exe" -Recurse | Select-Object -First 1
+          if (-not $builtExe) {
+            throw "Не найден собранный llama-server.exe в build-win8plus"
+          }
+          Copy-Item $builtExe.FullName -Destination "llama-server-win8plus-unmodified.exe" -Force
+          Get-Item "llama-server-win8plus-unmodified.exe"
+
+      - name: "3. Передача немодифицированной сборки Win8+ в основной пайплайн"
+        uses: actions/upload-artifact@v4
+        with:
+          name: win8plus-unmodified-bin
+          path: llama-server-win8plus-unmodified.exe
+          retention-days: 1
+
   build-and-release-portable:
+    name: "Сборка портативного пакета (Astra Linux 1.7.11 + Win7 + Win8+) и выпуск Release"
     runs-on: ubuntu-22.04
+    needs: [build-win8plus-unmodified]
     steps:
       - name: "1. Клонирование репозитория"
         uses: actions/checkout@v4
 
-      - name: "2. Установка кросс-компиляторов (Mingw-w64 POSIX Threads для Windows и инструменты сборки)"
+      - name: "2. Установка кросс-компиляторов (Mingw-w64 POSIX Threads для Win7 и инструменты сборки)"
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git curl zip unzip xz-utils \
@@ -57,7 +100,7 @@ jobs:
 
       - name: "5. Компиляция 100% статических llama-server для Astra Linux 1.7.11 (musl static, Core i3-9100 AVX2 + универсальный SSE4.2)"
         run: |
-          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp
 
           # Собираем внутри Alpine (musl static), чтобы бинарник вообще не зависел от glibc и libcrypto на целевом компьютере
           # Вариант А: Универсальный SSE4.2 (без AVX/AVX2/AVX-512) для любых старых процессоров
@@ -94,32 +137,21 @@ jobs:
             chmod +x /out/bin/linux-x64-avx2/llama-server
           '
 
-      - name: "6. Кросс-компиляция llama-server.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11 (до применения Win7-патча)"
+      - name: "6. Подключение нативной сборки llama-server.exe БЕЗ МОДИФИКАЦИЙ (Windows 8+ / 10 / 11)"
+        uses: actions/download-artifact@v4
+        with:
+          name: win8plus-unmodified-bin
+          path: .
+
+      - name: "6.1. Укладка немодифицированной сборки Win8+ в пакет"
         run: |
-          cmake -B /tmp/llama-cpp/build-win8plus -S /tmp/llama-cpp \
-            -DCMAKE_SYSTEM_NAME=Windows \
-            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
-            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00" \
-            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0A00" \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_NATIVE=OFF \
-            -DGGML_OPENMP=OFF \
-            -DLLAMA_CURL=OFF \
-            -DLLAMA_OPENSSL=OFF \
-            -DLLAMA_BUILD_UI=OFF \
-            -DLLAMA_BUILD_WEBUI=OFF \
-            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
-          cmake --build /tmp/llama-cpp/build-win8plus --target llama-server -j$(nproc)
-          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe dist-airgap/bin/win8plus-x64/llama-server.exe
-          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe llama-server-win8plus-unmodified.exe
+          cp llama-server-win8plus-unmodified.exe dist-airgap/bin/win8plus-x64/llama-server.exe
 
       - name: "7. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (С патчем cpp-httplib CreateFileW)"
         run: |
-          # Патчим cpp-httplib в llama.cpp исключительно для сборки Windows 7 SP1:
-          # убираем директиву #error и заменяем многострочный вызов ::CreateFile2(...); на ::CreateFileW(...);
+          # Патчим cpp-httplib и CMakeLists в /tmp/llama-cpp исключительно для сборки Windows 7 SP1:
+          # 1) убираем директиву #error и заменяем многострочный вызов ::CreateFile2(...); на ::CreateFileW(...);
+          # 2) задаем _WIN32_WINNT=0x0601 (Windows 7 SP1) через GGML_WIN_VER=0x0601
           python3 - << 'EOF'
           import glob, re
 
@@ -143,8 +175,7 @@ jobs:
             -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
             -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
-            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601" \
-            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \
+            -DGGML_WIN_VER=0x0601 \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_NATIVE=OFF \
@@ -153,7 +184,7 @@ jobs:
             -DLLAMA_OPENSSL=OFF \
             -DLLAMA_BUILD_UI=OFF \
             -DLLAMA_BUILD_WEBUI=OFF \
-            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF -DGGML_SSE42=ON
           cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j$(nproc)
           cp /tmp/llama-cpp/build-win7/bin/llama-server.exe dist-airgap/bin/win7-x64/llama-server.exe
           cp /tmp/llama-cpp/build-win7/bin/llama-server.exe llama-server-win7-patched.exe
@@ -203,7 +234,7 @@ jobs:
             ### Полностью автономный пакет для Astra Linux 1.7.11 (усиленный, ядро 6.1, Core i3-9100), Windows 7 SP1 и Windows 8+ / 10 / 11
             В состав релиза включены:
             1. **`office-assistant-ru-portable-airgap.zip`** — полный портативный пакет с двумя версиями Windows-сервера (`bin/win8plus-x64/llama-server.exe` **без модификаций** + `bin/win7-x64/llama-server.exe` с патчем под Windows 7 SP1) и двумя 100% статическими Linux-бинарниками (`bin/linux-x64-avx2/llama-server` под **Intel Core i3-9100** + универсальный `bin/linux-x64/llama-server` `SSE4.2`).
-            2. **`llama-server-win8plus-unmodified.exe`** — отдельная сборка `llama.cpp` **без каких-либо модификаций исходного кода** (Windows 8 / 8.1 / 10 / 11).
+            2. **`llama-server-win8plus-unmodified.exe`** — отдельная нативная сборка `llama.cpp` **без каких-либо модификаций исходного кода** (Windows 8+ / 10 / 11, MSVC static `/MT`).
             3. **`llama-server-win7-patched.exe`** — отдельная сборка `llama.cpp` с патчем совместимости под Windows 7 SP1.
             4. **`Офисный-Помощник-Автономный.html`** — однофайловая браузерная версия (работает с `.docx`, `.xlsx`, `.pptx` даже в режиме **Astra Linux «Усиленный»** при блокировке сторонних бинарников и скриптов).
           files: |
