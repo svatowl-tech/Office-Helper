@@ -1,4 +1,4 @@
-name: "Build & Release Portable Air-Gap Office Assistant (Astra Linux 5.3/5.4 + Windows 7+)"
+name: "Build & Release Portable Air-Gap Office Assistant (Astra Linux 1.7.11 + Win7 + Win8+)"
 
 on:
   push:
@@ -19,13 +19,13 @@ jobs:
       - name: "1. Клонирование репозитория"
         uses: actions/checkout@v4
 
-      - name: "2. Установка кросс-компиляторов (Mingw-w64 POSIX Threads для Windows 7 и Static Toolchain для Astra Linux)"
+      - name: "2. Установка кросс-компиляторов (Mingw-w64 POSIX Threads для Windows и инструменты сборки)"
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git curl zip unzip xz-utils \
             mingw-w64-x86-64-dev gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
 
-      - name: "3. Сборка фронтенда (dist) и автономного серверного бандла (dist-server/server.cjs)"
+      - name: "3. Сборка фронтенда (dist), сервера (dist-server/server.cjs) и автономного HTML"
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -33,50 +33,101 @@ jobs:
           npm install --legacy-peer-deps --no-audit --no-fund
           npm run build
           mkdir -p dist-airgap/bin/linux-x64
+          mkdir -p dist-airgap/bin/linux-x64-avx2
           mkdir -p dist-airgap/bin/win7-x64
+          mkdir -p dist-airgap/bin/win8plus-x64
           mkdir -p dist-airgap/models/sage-95m
           mkdir -p dist-airgap/tessdata
 
-      - name: "4. Компиляция НАТИВНЫХ лаунчеров (в обход блокировок .bat, cmd.exe и .sh)"
+      - name: "4. Компиляция НАТИВНЫХ лаунчеров (без зависимости от .bat, cmd.exe и .sh)"
         run: |
-          # 1) Нативный графический .EXE лаунчер для Windows 7/10/11 (использует прямые вызовы Win32 CreateProcessW без cmd.exe)
+          # 1) Нативный графический .EXE лаунчер для Windows 7/8/10/11 (прямые вызовы Win32 CreateProcessW без cmd.exe)
           x86_64-w64-mingw32-gcc-posix -O2 -mwindows -static \
             server/native-launcher.c \
             -o dist-airgap/Office-Assistant.exe \
             -lshell32 -luser32 -lkernel32
           cp dist-airgap/Office-Assistant.exe "dist-airgap/Офисный-Помощник.exe"
 
-          # 2) Нативный статический ELF-бинарник для Astra Linux (использует прямой вызов ядра execv без /bin/sh)
-          gcc -O2 -static server/native-launcher.c -o dist-airgap/Office-Assistant-AstraLinux.run
-          chmod +x dist-airgap/Office-Assistant-AstraLinux.run
-          cp dist-airgap/Office-Assistant-AstraLinux.run "dist-airgap/Офисный-Помощник-AstraLinux.run"
+          # 2) Нативный 100% статический ELF-бинарник для Astra Linux (musl static — работает на ядрах 5.3, 5.4 и 6.1.188-1-generic без зависимости от glibc)
+          docker run --rm -v "${{ github.workspace }}:/src" -w /src alpine:3.20 sh -c \
+            "apk add --no-cache gcc musl-dev && \
+             gcc -O2 -static server/native-launcher.c -o /src/dist-airgap/Office-Assistant-AstraLinux.run && \
+             chmod +x /src/dist-airgap/Office-Assistant-AstraLinux.run && \
+             cp /src/dist-airgap/Office-Assistant-AstraLinux.run '/src/dist-airgap/Офисный-Помощник-AstraLinux.run'"
 
-      - name: "5. Компиляция llama-server для Astra Linux (ядро 5.3/5.4, SSE4.2, статическая линковка без зависимостей)"
+      - name: "5. Компиляция 100% статических llama-server для Astra Linux 1.7.11 (musl static, Core i3-9100 AVX2 + универсальный SSE4.2)"
         run: |
           git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
-          cmake -B /tmp/llama-cpp/build-linux -S /tmp/llama-cpp \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
-          cmake --build /tmp/llama-cpp/build-linux --target llama-server -j$(nproc)
-          cp /tmp/llama-cpp/build-linux/bin/llama-server dist-airgap/bin/linux-x64/llama-server
-          chmod +x dist-airgap/bin/linux-x64/llama-server
 
-      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (Патч cpp-httplib CreateFileW + POSIX Threads + Static)"
+          # Собираем внутри Alpine (musl static), чтобы бинарник вообще не зависел от glibc и libcrypto на целевом компьютере
+          # Вариант А: Универсальный SSE4.2 (без AVX/AVX2/AVX-512) для любых старых процессоров
+          # Вариант Б: AVX2 + FMA (без AVX-512!) — идеально под Intel Core i3-9100 (Astra Linux 1.7.11)
+          docker run --rm -v /tmp/llama-cpp:/llama -v "${{ github.workspace }}/dist-airgap:/out" alpine:3.20 sh -c '
+            apk add --no-cache build-base cmake linux-headers && \
+            cmake -B /tmp/build-sse -S /llama \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DGGML_NATIVE=OFF \
+              -DGGML_OPENMP=OFF \
+              -DLLAMA_CURL=OFF \
+              -DLLAMA_OPENSSL=OFF \
+              -DLLAMA_BUILD_UI=OFF \
+              -DLLAMA_BUILD_WEBUI=OFF \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON \
+              -DCMAKE_EXE_LINKER_FLAGS="-static" && \
+            cmake --build /tmp/build-sse --target llama-server -j$(nproc) && \
+            cp /tmp/build-sse/bin/llama-server /out/bin/linux-x64/llama-server && \
+            chmod +x /out/bin/linux-x64/llama-server && \
+            cmake -B /tmp/build-avx2 -S /llama \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DGGML_NATIVE=OFF \
+              -DGGML_OPENMP=OFF \
+              -DLLAMA_CURL=OFF \
+              -DLLAMA_OPENSSL=OFF \
+              -DLLAMA_BUILD_UI=OFF \
+              -DLLAMA_BUILD_WEBUI=OFF \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON \
+              -DCMAKE_EXE_LINKER_FLAGS="-static" && \
+            cmake --build /tmp/build-avx2 --target llama-server -j$(nproc) && \
+            cp /tmp/build-avx2/bin/llama-server /out/bin/linux-x64-avx2/llama-server && \
+            chmod +x /out/bin/linux-x64-avx2/llama-server
+          '
+
+      - name: "6. Кросс-компиляция llama-server.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11 (до применения Win7-патча)"
         run: |
-          # Патчим cpp-httplib в llama.cpp: убираем искусственную блокировку Windows 7 (#error)
-          # и заменяем многострочный вызов Windows 8 API ::CreateFile2(...); на классический Windows 7 API ::CreateFileW(...);
+          cmake -B /tmp/llama-cpp/build-win8plus -S /tmp/llama-cpp \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
+            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00" \
+            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0A00" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
+          cmake --build /tmp/llama-cpp/build-win8plus --target llama-server -j$(nproc)
+          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe dist-airgap/bin/win8plus-x64/llama-server.exe
+          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe llama-server-win8plus-unmodified.exe
+
+      - name: "7. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (С патчем cpp-httplib CreateFileW)"
+        run: |
+          # Патчим cpp-httplib в llama.cpp исключительно для сборки Windows 7 SP1:
+          # убираем директиву #error и заменяем многострочный вызов ::CreateFile2(...); на ::CreateFileW(...);
           python3 - << 'EOF'
           import glob, re
 
           for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True):
               with open(p, 'r', encoding='utf-8', errors='ignore') as f:
                   code = f.read()
-              # 1. Отключаем директиву #error "cpp-httplib doesn't support Windows 8 or lower..."
               code = re.sub(r'#\s*error\s+[^\n]*Windows 8 or lower[^\n]*', '// Windows 7 SP1 compatibility patch applied', code)
               code = re.sub(r'#\s*error\s*\\\s*\n\s*"cpp-httplib doesn\'t support Windows 8 or lower[^"]*"', '// Windows 7 SP1 compatibility patch applied', code)
-              # 2. Заменяем весь оператор ::CreateFile2(...); вплоть до ); чтобы внутренние скобки wpath.c_str() не обрывали замену
               code = re.sub(
                   r'::CreateFile2\s*\([^;]*?\)\s*;',
                   '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);',
@@ -96,11 +147,18 @@ jobs:
             -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \
             -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_BUILD_WEBUI=OFF \
             -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON
           cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j$(nproc)
           cp /tmp/llama-cpp/build-win7/bin/llama-server.exe dist-airgap/bin/win7-x64/llama-server.exe
+          cp /tmp/llama-cpp/build-win7/bin/llama-server.exe llama-server-win7-patched.exe
 
-      - name: "7. Вшивание портативных бинарников Node.js LTS (запуск из папки без установки в систему)"
+      - name: "8. Вшивание портативных бинарников Node.js 18 LTS (glibc 2.28 — совместим с Astra Linux 1.7.11 и Windows 7+)"
         run: |
           curl -L --retry 5 "https://nodejs.org/dist/v18.20.4/node-v18.20.4-linux-x64.tar.xz" -o /tmp/node-linux.tar.xz
           tar -xf /tmp/node-linux.tar.xz -C /tmp
@@ -109,7 +167,7 @@ jobs:
 
           curl -L --retry 5 "https://nodejs.org/dist/v18.20.4/win-x64/node.exe" -o dist-airgap/bin/win7-x64/node.exe
 
-      - name: "8. Загрузка и включение в пакет локальных русских нейросетей (SAGE FRED-T5 + Qwen2.5-1.5B GGUF) и OCR словарей"
+      - name: "9. Загрузка и включение в пакет локальных русских нейросетей (SAGE FRED-T5 + Qwen2.5-1.5B GGUF) и OCR словарей"
         run: |
           curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/config.json" -o dist-airgap/models/sage-95m/config.json
           curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/pytorch_model.bin" -o dist-airgap/models/sage-95m/pytorch_model.bin
@@ -118,37 +176,41 @@ jobs:
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata" -o dist-airgap/tessdata/rus.traineddata
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -o dist-airgap/tessdata/eng.traineddata
 
-      - name: "9. Формирование полностью автономного пакета (3 способа запуска: Нативный EXE/ELF, HTML без EXE, и Скрипты)"
+      - name: "10. Формирование полностью автономного пакета (Нативный EXE/ELF, HTML без EXE, Скрипты, Win7 + Win8+)"
         run: |
           cp -r dist dist-server Офисный-Помощник-Автономный.html start-astra-linux.sh start-windows7.bat README.md dist-airgap/
           chmod +x dist-airgap/start-astra-linux.sh
           cd dist-airgap && zip -r9 ../office-assistant-ru-portable-airgap.zip . && cd ..
           tar -czf office-assistant-ru-astra-linux-portable.tar.gz -C dist-airgap .
 
-      - name: "10. Выгрузка готового архива в GitHub Actions Artifacts"
+      - name: "11. Выгрузка готовых артефактов в GitHub Actions Artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: office-assistant-ru-portable-airgap
           path: |
             office-assistant-ru-portable-airgap.zip
             office-assistant-ru-astra-linux-portable.tar.gz
+            llama-server-win8plus-unmodified.exe
+            llama-server-win7-patched.exe
           retention-days: 90
 
-      - name: "11. Автоматическое создание GitHub Release с прикрепленными архивами для скачивания"
+      - name: "12. Автоматическое создание GitHub Release с прикрепленными архивами и доп. сборкой Win 8+"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v1.0.{0}', github.run_number) }}
           name: "Офисный помощник (Portable Air-Gap Release #${{ github.run_number }})"
           body: |
-            ### Полностью автономный пакет с 3 независимыми контурами запуска (даже при блокировке `.bat` и `.sh`)
-            В состав архива включены:
-            1. **`Офисный-Помощник.exe` (Windows 7/10/11) и `Офисный-Помощник-AstraLinux.run` (Astra Linux 5.3/5.4)** — нативные скомпилированные C-лаунчеры, которые запускают приложение напрямую через системные вызовы ядра (`CreateProcessW` / `execv`), **полностью обходя блокировки `cmd.exe`, `.bat`, PowerShell и `/bin/sh`**.
-            2. **`Офисный-Помощник-Автономный.html`** — резервная однофайловая версия, которая открывается двойным кликом в любом браузере по протоколу `file://` даже там, где заблокирован запуск вообще любых `.exe` файлов.
-            3. **`start-windows7.bat` / `start-astra-linux.sh`** — классические консольные скрипты.
-            4. Вшитые локальные нейросети русского языка (`ai-forever/sage-fredt5-distilled-95m` + `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`) и словари `rus.traineddata`.
+            ### Полностью автономный пакет для Astra Linux 1.7.11 (усиленный, ядро 6.1, Core i3-9100), Windows 7 SP1 и Windows 8+ / 10 / 11
+            В состав релиза включены:
+            1. **`office-assistant-ru-portable-airgap.zip`** — полный портативный пакет с двумя версиями Windows-сервера (`bin/win8plus-x64/llama-server.exe` **без модификаций** + `bin/win7-x64/llama-server.exe` с патчем под Windows 7 SP1) и двумя 100% статическими Linux-бинарниками (`bin/linux-x64-avx2/llama-server` под **Intel Core i3-9100** + универсальный `bin/linux-x64/llama-server` `SSE4.2`).
+            2. **`llama-server-win8plus-unmodified.exe`** — отдельная сборка `llama.cpp` **без каких-либо модификаций исходного кода** (Windows 8 / 8.1 / 10 / 11).
+            3. **`llama-server-win7-patched.exe`** — отдельная сборка `llama.cpp` с патчем совместимости под Windows 7 SP1.
+            4. **`Офисный-Помощник-Автономный.html`** — однофайловая браузерная версия (работает с `.docx`, `.xlsx`, `.pptx` даже в режиме **Astra Linux «Усиленный»** при блокировке сторонних бинарников и скриптов).
           files: |
             office-assistant-ru-portable-airgap.zip
             office-assistant-ru-astra-linux-portable.tar.gz
+            llama-server-win8plus-unmodified.exe
+            llama-server-win7-patched.exe
             Офисный-Помощник-Автономный.html
           draft: false
           prerelease: false

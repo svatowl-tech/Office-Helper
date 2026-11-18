@@ -263,17 +263,15 @@ async function startServer() {
   // Автоматический старт локального движка llama-server из C++/нативного бинарника (без участия .bat/.sh)
   let llamaProcess: ChildProcess | null = null;
   try {
-    const isWin = os.platform() === 'win32';
     const baseDir = process.cwd();
-    const llamaBinPath = isWin
-      ? path.join(baseDir, 'bin', 'win7-x64', 'llama-server.exe')
-      : path.join(baseDir, 'bin', 'linux-x64', 'llama-server');
+    const llamaBinPath = resolveBestLlamaBinaryPath(baseDir);
     const ggufModelPath = path.join(
       process.env.LOCAL_MODELS_DIR || path.join(baseDir, 'models'),
       'qwen2.5-1.5b-instruct-q4_k_m.gguf'
     );
 
-    if (fs.existsSync(llamaBinPath) && fs.existsSync(ggufModelPath)) {
+    if (llamaBinPath && fs.existsSync(llamaBinPath) && fs.existsSync(ggufModelPath)) {
+      console.debug(`Запуск локального CPU-движка: ${llamaBinPath}`);
       llamaProcess = spawn(
         llamaBinPath,
         [
@@ -308,6 +306,51 @@ async function startServer() {
       openLocalBrowserSafely(localUrl);
     }
   });
+}
+
+/**
+ * Автоматически выбирает оптимальный бинарник llama-server:
+ * - Windows 8 / 8.1 / 10 / 11 -> немодифицированный bin/win8plus-x64/llama-server.exe (с fallback на win7-x64)
+ * - Windows 7 SP1 (NT 6.1)      -> патченный под Win7 bin/win7-x64/llama-server.exe
+ * - Astra Linux (i3-9100 и др.) -> bin/linux-x64-avx2/llama-server если CPU поддерживает AVX2, иначе универсальный SSE4.2
+ */
+function resolveBestLlamaBinaryPath(baseDir: string): string | null {
+  const platform = os.platform();
+  const forced = process.env.LLAMA_VARIANT;
+
+  if (platform === 'win32') {
+    const win8PlusBin = path.join(baseDir, 'bin', 'win8plus-x64', 'llama-server.exe');
+    const win7Bin = path.join(baseDir, 'bin', 'win7-x64', 'llama-server.exe');
+
+    if (forced === 'win7' && fs.existsSync(win7Bin)) return win7Bin;
+    if (forced === 'win8plus' && fs.existsSync(win8PlusBin)) return win8PlusBin;
+
+    const parts = os.release().split('.').map(Number);
+    const major = parts[0] || 0;
+    const minor = parts[1] || 0;
+    const isWin8Plus = major >= 10 || (major === 6 && minor >= 2);
+
+    if (isWin8Plus && fs.existsSync(win8PlusBin)) return win8PlusBin;
+    if (fs.existsSync(win7Bin)) return win7Bin;
+    if (fs.existsSync(win8PlusBin)) return win8PlusBin;
+    return null;
+  }
+
+  const linuxAvx2Bin = path.join(baseDir, 'bin', 'linux-x64-avx2', 'llama-server');
+  const linuxSseBin = path.join(baseDir, 'bin', 'linux-x64', 'llama-server');
+
+  if (forced === 'sse42' && fs.existsSync(linuxSseBin)) return linuxSseBin;
+  if (forced === 'avx2' && fs.existsSync(linuxAvx2Bin)) return linuxAvx2Bin;
+
+  try {
+    const cpuInfo = fs.existsSync('/proc/cpuinfo') ? fs.readFileSync('/proc/cpuinfo', 'utf8') : '';
+    const hasAvx2 = /\bavx2\b/i.test(cpuInfo);
+    if (hasAvx2 && fs.existsSync(linuxAvx2Bin)) return linuxAvx2Bin;
+  } catch {
+    // fallback to SSE4.2
+  }
+
+  return fs.existsSync(linuxSseBin) ? linuxSseBin : null;
 }
 
 /**

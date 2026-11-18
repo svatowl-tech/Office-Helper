@@ -70,19 +70,37 @@ jobs:
           mkdir -p dist-airgap/bin/win7-x64
           mkdir -p dist-airgap/models/sage-95m
 
-      - name: "4. Компиляция llama-server для Astra Linux (ядро 5.3/5.4, статическая линковка libstdc++/libgomp)"
+      - name: "4. Компиляция llama-server для Astra Linux 1.7.11 (musl static, AVX2 для Core i3-9100 + SSE4.2)"
         run: |
           git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
-          cmake -B /tmp/llama-cpp/build-linux -S /tmp/llama-cpp \\
-            -DCMAKE_BUILD_TYPE=Release \\
-            ${simdFlags} \\
-            -DBUILD_SHARED_LIBS=OFF \\
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
-          cmake --build /tmp/llama-cpp/build-linux --target llama-server -j$(nproc)
-          cp /tmp/llama-cpp/build-linux/bin/llama-server dist-airgap/bin/linux-x64/llama-server
-          chmod +x dist-airgap/bin/linux-x64/llama-server
+          mkdir -p dist-airgap/bin/linux-x64-avx2 dist-airgap/bin/win8plus-x64
+          docker run --rm -v /tmp/llama-cpp:/llama -v "\${{ github.workspace }}/dist-airgap:/out" alpine:3.20 sh -c '
+            apk add --no-cache build-base cmake linux-headers && \
+            cmake -B /tmp/build-sse -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \
+            cmake --build /tmp/build-sse --target llama-server -j$(nproc) && \
+            cp /tmp/build-sse/bin/llama-server /out/bin/linux-x64/llama-server && \
+            cmake -B /tmp/build-avx2 -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \
+            cmake --build /tmp/build-avx2 --target llama-server -j$(nproc) && \
+            cp /tmp/build-avx2/bin/llama-server /out/bin/linux-x64-avx2/llama-server
+          '
 
-      - name: "5. Кросс-компиляция llama-server.exe специально под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601)"
+      - name: "5. Кросс-компиляция llama-server.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11"
+        run: |
+          cmake -B /tmp/llama-cpp/build-win8plus -S /tmp/llama-cpp \\
+            -DCMAKE_SYSTEM_NAME=Windows \\
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \\
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \\
+            -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00" \\
+            -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0A00" \\
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
+            ${simdFlags}
+          cmake --build /tmp/llama-cpp/build-win8plus --target llama-server -j\$(nproc)
+          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe dist-airgap/bin/win8plus-x64/llama-server.exe
+          cp /tmp/llama-cpp/build-win8plus/bin/llama-server.exe llama-server-win8plus-unmodified.exe
+
+      - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601 + CreateFileW)"
         run: |
           python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#\\s*error\\s*\\\\?\\s*\\n?\\s*\"cpp-httplib doesn.t support Windows 8 or lower[^\"]*\"', '// Win7 patch', open(p).read()), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \\
@@ -93,12 +111,13 @@ jobs:
             -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601" \\
             -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601" \\
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
-            -DBUILD_SHARED_LIBS=OFF \\
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
             ${simdFlags}
-          cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j$(nproc)
+          cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j\$(nproc)
           cp /tmp/llama-cpp/build-win7/bin/llama-server.exe dist-airgap/bin/win7-x64/llama-server.exe
+          cp /tmp/llama-cpp/build-win7/bin/llama-server.exe llama-server-win7-patched.exe
 
-      - name: "6. Вшивание портативного Node.js LTS с поддержкой Windows 7 (NODE_SKIP_PLATFORM_CHECK=1) и Linux glibc 2.24"
+      - name: "7. Вшивание портативного Node.js LTS (glibc 2.28 — Astra Linux 1.7.11 и Windows 7+)"
         run: |
           curl -L "https://nodejs.org/dist/v18.20.4/node-v18.20.4-linux-x64.tar.xz" -o /tmp/node-linux.tar.xz
           tar -xf /tmp/node-linux.tar.xz -C /tmp
@@ -106,30 +125,36 @@ jobs:
           
           curl -L "https://nodejs.org/dist/v18.20.4/win-x64/node.exe" -o dist-airgap/bin/win7-x64/node.exe
 
-      - name: "7. Загрузка весов русской нейросети и словарей OCR внутрь оффлайн-архива"
+      - name: "8. Загрузка весов русской нейросети и словарей OCR внутрь оффлайн-архива"
         run: |
           ${modelDownloadBlock}
           ${ocrDownloadBlock}
 
-      - name: "8. Упаковка готового оффлайн-дистрибутива (Zero-Install Portable Archive)"
+      - name: "9. Упаковка готового оффлайн-дистрибутива (Zero-Install Portable Archive)"
         run: |
-          cp -r dist dist-server start-astra-linux.sh start-windows7.bat README.md dist-airgap/
+          cp -r dist dist-server Офисный-Помощник-Автономный.html start-astra-linux.sh start-windows7.bat README.md dist-airgap/
           chmod +x dist-airgap/start-astra-linux.sh
           cd dist-airgap && zip -r9 ../office-assistant-ru-portable-airgap.zip . && cd ..
 
-      - name: "9. Публикация собранного пакета в GitHub Artifacts и GitHub Releases"
+      - name: "10. Публикация собранного пакета в GitHub Artifacts и GitHub Releases"
         uses: actions/upload-artifact@v4
         with:
           name: office-assistant-ru-portable-airgap
-          path: office-assistant-ru-portable-airgap.zip
+          path: |
+            office-assistant-ru-portable-airgap.zip
+            llama-server-win8plus-unmodified.exe
+            llama-server-win7-patched.exe
           retention-days: 90
 
-      - name: "10. Автоматический выпуск GitHub Release"
+      - name: "11. Автоматический выпуск GitHub Release"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: \${{ github.ref_type == 'tag' && github.ref_name || format('v1.0.{0}', github.run_number) }}
           name: "Офисный помощник (Portable Air-Gap Release #\${{ github.run_number }})"
-          files: office-assistant-ru-portable-airgap.zip
+          files: |
+            office-assistant-ru-portable-airgap.zip
+            llama-server-win8plus-unmodified.exe
+            llama-server-win7-patched.exe
         env:
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 `;

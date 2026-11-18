@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && npm run build:server",
+    "build": "vite build && npm run build:server && npm run build:html",
     "build:server": "esbuild server.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist-server/server.cjs --external:vite",
+    "build:html": "node scripts/build-standalone-html.mjs",
     "start": "tsx server.ts",
     "start:portable": "node dist-server/server.cjs",
     "preview": "vite preview",
