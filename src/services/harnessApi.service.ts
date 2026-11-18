@@ -3,6 +3,7 @@ import {
   GithubBundleConfig,
   LanNodeProbeResult,
   LocalModelSpec,
+  OcrOutputFormat,
   SystemTelemetry,
   TextIssue,
 } from '../types/harness.types';
@@ -37,6 +38,40 @@ export async function apiProofreadDocument(file: File): Promise<DocumentProofrea
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Ошибка обработки файла' }));
     throw new Error(err.error || 'Ошибка обработки файла');
+  }
+  return res.json();
+}
+
+export async function apiRecognizePdfOrImage(
+  file: File,
+  outputFormat: OcrOutputFormat = 'docx'
+): Promise<DocumentProofreadResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('outputFormat', outputFormat);
+
+  const res = await fetch('/api/ocr/recognize', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Ошибка распознавания PDF / изображения' }));
+    throw new Error(err.error || 'Ошибка распознавания PDF / изображения');
+  }
+  return res.json();
+}
+
+export async function apiLoadSampleOcrPdf(
+  outputFormat: OcrOutputFormat = 'docx'
+): Promise<DocumentProofreadResult> {
+  const res = await fetch('/api/ocr/sample', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outputFormat }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Не удалось распознать тестовый PDF' }));
+    throw new Error(err.error || 'Не удалось распознать тестовый PDF');
   }
   return res.json();
 }

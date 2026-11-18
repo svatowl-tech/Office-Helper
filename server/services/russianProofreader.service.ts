@@ -1,4 +1,12 @@
-import { CorrectionCategory, TextIssue } from '../../src/types/harness.types.ts';
+import {
+  CorrectionCategory,
+  HarnessChunkingConfig,
+  TextIssue,
+} from '../../src/types/harness.types.ts';
+import {
+  DEFAULT_HARNESS_CHUNKING_CONFIG,
+  executeHarnessChunkedTask,
+} from './textChunker.service.ts';
 
 interface RuleDefinition {
   id: string;
@@ -425,30 +433,128 @@ export interface ProofreadTextResult {
   correctedText: string;
   issues: TextIssue[];
   engineUsed: string;
+  totalChunksProcessed: number;
+  chunkMaxCharsUsed: number;
+}
+
+// Кэш состояния локального llama-server (чтобы не ждать таймаут на каждом чанке, если сервер не запущен)
+let llamaHealthCache: { available: boolean; checkedAt: number } = {
+  available: false,
+  checkedAt: 0,
+};
+
+async function isLocalLlamaServerAvailable(baseUrl: string): Promise<boolean> {
+  const now = Date.now();
+  if (now - llamaHealthCache.checkedAt < 10_000) {
+    return llamaHealthCache.available;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 350);
+  try {
+    const res = await fetch(`${baseUrl}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    llamaHealthCache = { available: res.ok, checkedAt: now };
+    return res.ok;
+  } catch {
+    clearTimeout(timeout);
+    llamaHealthCache = { available: false, checkedAt: now };
+    return false;
+  }
 }
 
 /**
- * Прогоняет текст через локальный движок коррекции русского языка.
- * Сначала проверяет, запущен ли внешний локальный GGUF/ONNX сервер на LOCAL_LLAMA_SERVER_URL,
- * и комбинирует его с детерминированным правилом ГОСТ/SAGE для 100% надежности без галлюцинаций.
+ * Отправляет ровно один короткий чанк (<= 480 символов) в локальный llama-server (127.0.0.1:8080),
+ * чтобы гарантированно поместиться в маленькое окно контекста модели без обрезки и галлюцинаций.
  */
-export async function proofreadRussianText(text: string): Promise<ProofreadTextResult> {
-  if (!text || text.trim().length === 0) {
-    return {
-      originalText: text,
-      correctedText: text,
-      issues: [],
-      engineUsed: 'SAGE-FRED-T5-95M-INT8 + ГОСТ Р 7.0.97 (Локальное ядро CPU)',
-    };
+async function refineSingleChunkWithLocalLlama(chunkText: string): Promise<{
+  correctedChunk: string;
+  usedLlama: boolean;
+}> {
+  const baseUrl = (process.env.LOCAL_LLAMA_SERVER_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
+  const available = await isLocalLlamaServerAvailable(baseUrl);
+  if (!available) {
+    return { correctedChunk: chunkText, usedLlama: false };
   }
 
-  let workingText = text;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4500);
+
+  try {
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Ты корректор русского делового языка. Исправь только орфографические, грамматические и пунктуационные ошибки во входном фрагменте. Верни ТОЛЬКО исправленный текст без комментариев, без кавычек и без изменения смысла.',
+          },
+          {
+            role: 'user',
+            content: chunkText,
+          },
+        ],
+        temperature: 0.0,
+        max_tokens: Math.min(512, Math.ceil(chunkText.length * 1.4) + 32),
+        stream: false,
+      }),
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      return { correctedChunk: chunkText, usedLlama: false };
+    }
+
+    const data = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const candidate = data?.choices?.[0]?.message?.content?.trim();
+
+    // Защита от галлюцинаций малой модели: длина исправленного чанка не должна отличаться более чем на 30%
+    if (
+      !candidate ||
+      candidate.length < chunkText.length * 0.7 ||
+      candidate.length > chunkText.length * 1.35
+    ) {
+      return { correctedChunk: chunkText, usedLlama: false };
+    }
+
+    return { correctedChunk: candidate, usedLlama: true };
+  } catch {
+    clearTimeout(timeout);
+    return { correctedChunk: chunkText, usedLlama: false };
+  }
+}
+
+const CYRILLIC_WORD_BOUNDARY =
+  '(?:(?<=[а-яёА-ЯЁa-zA-Z0-9_])(?![а-яёА-ЯЁa-zA-Z0-9_])|(?<![а-яёА-ЯЁa-zA-Z0-9_])(?=[а-яёА-ЯЁa-zA-Z0-9_]))';
+
+function buildCyrillicRegex(pattern: RegExp): RegExp {
+  const sourceWithUnicodeBoundaries = pattern.source.replace(/\\b/g, CYRILLIC_WORD_BOUNDARY);
+  return new RegExp(sourceWithUnicodeBoundaries, pattern.flags);
+}
+
+/**
+ * Применяет детерминированные правила ГОСТ/SAGE и (при наличии) локальный GGUF-сервер к ОДНОМУ короткому чанку.
+ */
+async function proofreadSingleChunk(chunkText: string): Promise<{
+  transformedText: string;
+  issues: TextIssue[];
+  meta: { usedLlama: boolean };
+}> {
+  let workingText = chunkText;
   const issues: TextIssue[] = [];
 
   for (const rule of RUSSIAN_CORRECTION_RULES) {
     if (!rule.ruleTitle) continue;
 
-    const regex = new RegExp(rule.pattern.source, rule.pattern.flags);
+    const regex = buildCyrillicRegex(rule.pattern);
     let match: RegExpExecArray | null;
 
     const matchesToApply: Array<{
@@ -464,7 +570,7 @@ export async function proofreadRussianText(text: string): Promise<ProofreadTextR
       const replacement =
         typeof rule.replace === 'function'
           ? rule.replace(fullMatch, ...groups)
-          : fullMatch.replace(new RegExp(rule.pattern.source, rule.pattern.flags), rule.replace);
+          : fullMatch.replace(buildCyrillicRegex(rule.pattern), rule.replace);
 
       if (replacement !== fullMatch) {
         matchesToApply.push({
@@ -476,7 +582,7 @@ export async function proofreadRussianText(text: string): Promise<ProofreadTextR
       }
     }
 
-    // Apply from right to left to preserve string offsets
+    // Применяем справа налево внутри чанка, чтобы не сбить локальные смещения
     for (let i = matchesToApply.length - 1; i >= 0; i--) {
       const item = matchesToApply[i];
       workingText =
@@ -496,10 +602,70 @@ export async function proofreadRussianText(text: string): Promise<ProofreadTextR
     }
   }
 
+  // Если на узле активен локальный llama-server (порт 8080), отправляем ему этот маленький чанк
+  const llamaRefinement = await refineSingleChunkWithLocalLlama(workingText);
+  if (llamaRefinement.usedLlama && llamaRefinement.correctedChunk !== workingText) {
+    issues.push({
+      id: `llama-chunk-${Date.now()}`,
+      startOffset: 0,
+      endOffset: llamaRefinement.correctedChunk.length,
+      original: workingText,
+      replacement: llamaRefinement.correctedChunk,
+      category: 'grammar',
+      ruleTitle: 'Контекстная коррекция малым локальным LLM-чанком',
+      explanation: 'Фрагмент скорректирован локальной нейросетью в рамках узкого окна контекста.',
+      confidence: 0.92,
+    });
+    workingText = llamaRefinement.correctedChunk;
+  }
+
   return {
-    originalText: text,
-    correctedText: workingText,
+    transformedText: workingText,
     issues,
-    engineUsed: 'SAGE-FRED-T5-95M-INT8 + ГОСТ Р 7.0.97 (Локальное ядро CPU)',
+    meta: { usedLlama: llamaRefinement.usedLlama },
   };
 }
+
+/**
+ * Прогоняет текст любой длины через стандартный конвейер чанкинга Харнеса (`executeHarnessChunkedTask`).
+ * Длинные тексты и документы автоматически разбиваются на маленькие кусочки (по умолчанию до 480 символов / ~180 токенов)
+ * по границам абзацев и предложений, отправляются в модель по частям и собираются обратно без потери форматирования.
+ */
+export async function proofreadRussianText(
+  text: string,
+  chunkConfig?: Partial<HarnessChunkingConfig>
+): Promise<ProofreadTextResult> {
+  const effectiveMaxChars =
+    chunkConfig?.maxChunkChars || DEFAULT_HARNESS_CHUNKING_CONFIG.maxChunkChars;
+
+  if (!text || text.trim().length === 0) {
+    return {
+      originalText: text,
+      correctedText: text,
+      issues: [],
+      engineUsed: 'SAGE-FRED-T5-95M-INT8 + ГОСТ Р 7.0.97 (Конвейер чанков CPU)',
+      totalChunksProcessed: 0,
+      chunkMaxCharsUsed: effectiveMaxChars,
+    };
+  }
+
+  const pipelineResult = await executeHarnessChunkedTask(
+    text,
+    async (chunkText) => proofreadSingleChunk(chunkText),
+    chunkConfig
+  );
+
+  const usedLlamaInAnyChunk = pipelineResult.chunkMeta.some((m) => m.usedLlama);
+
+  return {
+    originalText: text,
+    correctedText: pipelineResult.transformedText,
+    issues: pipelineResult.issues,
+    engineUsed: usedLlamaInAnyChunk
+      ? `Qwen2.5-1.5B-GGUF + SAGE-FRED-T5 (Чанкинг: ${pipelineResult.totalChunks} фр. по ≤${pipelineResult.chunkMaxCharsUsed} симв.)`
+      : `SAGE-FRED-T5-95M-INT8 + ГОСТ Р 7.0.97 (Чанкинг: ${pipelineResult.totalChunks} фр. по ≤${pipelineResult.chunkMaxCharsUsed} симв.)`,
+    totalChunksProcessed: pipelineResult.totalChunks,
+    chunkMaxCharsUsed: pipelineResult.chunkMaxCharsUsed,
+  };
+}
+

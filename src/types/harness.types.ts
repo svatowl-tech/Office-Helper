@@ -28,6 +28,25 @@ export interface DocumentSegment {
   applied: boolean;
 }
 
+export interface HarnessChunkingConfig {
+  maxChunkChars: number;
+  maxTokensEstimate: number;
+  preserveParagraphs: boolean;
+  preserveSentences: boolean;
+  concurrency: number;
+}
+
+export interface TextChunkSpan {
+  index: number;
+  text: string;
+  trailingSeparator: string;
+  startOffset: number;
+  endOffset: number;
+  estimatedTokens: number;
+}
+
+export type OcrOutputFormat = 'docx' | 'xlsx';
+
 export interface DocumentProofreadResult {
   fileName: string;
   fileType: 'docx' | 'xlsx' | 'pptx' | 'txt';
@@ -37,9 +56,16 @@ export interface DocumentProofreadResult {
   totalSegments: number;
   modifiedSegments: number;
   totalIssuesFixed: number;
+  totalChunksProcessed?: number;
+  chunkMaxCharsUsed?: number;
   segments: DocumentSegment[];
   downloadBase64: string;
   mimeType: string;
+  operationMode?: 'proofread' | 'ocr';
+  sourceFileName?: string;
+  secondaryFileName?: string;
+  secondaryDownloadBase64?: string;
+  secondaryMimeType?: string;
 }
 
 export interface LocalModelSpec {

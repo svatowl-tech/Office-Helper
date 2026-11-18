@@ -28,24 +28,32 @@ const html = `<!DOCTYPE html>
     body { background: #020617; color: #f1f5f9; height: 100vh; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; user-select: none; }
     header { padding: 24px; text-align: center; color: #94a3b8; font-size: 14px; font-weight: 500; }
     main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
-    .center-box { width: 100%; max-width: 440px; text-align: center; }
-    .main-btn { width: 100%; padding: 28px 32px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.25); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .center-box { width: 100%; max-width: 460px; text-align: center; display: flex; flex-direction: column; gap: 14px; }
+    .main-btn { width: 100%; padding: 22px 28px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.25); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 8px; }
     .main-btn:hover { background: #0ea5e9; }
-    .main-btn-title { font-size: 20px; font-weight: 700; }
+    .main-btn.ocr-btn { background: #4f46e5; box-shadow: 0 10px 25px rgba(79,70,229,0.25); }
+    .main-btn.ocr-btn:hover { background: #6366f1; }
+    .main-btn-title { font-size: 19px; font-weight: 700; }
     .main-btn-sub { font-size: 12px; color: #e0f2fe; }
-    .progress-wrap { margin-top: 20px; display: none; }
+    .format-switch { display: inline-flex; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 3px; gap: 4px; margin-top: 2px; }
+    .fmt-opt { border: none; background: transparent; color: #94a3b8; font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer; }
+    .fmt-opt.active { background: #4f46e5; color: #fff; }
+    .progress-wrap { margin-top: 6px; display: none; }
     .progress-bar-bg { width: 100%; height: 8px; background: #0f172a; border: 1px solid #1e293b; border-radius: 999px; overflow: hidden; margin-top: 6px; }
     .progress-bar-fill { height: 100%; width: 0%; background: #0ea5e9; transition: width 0.15s; }
-    .error-box { margin-top: 14px; padding: 10px 14px; border-radius: 10px; background: rgba(127, 29, 29, 0.5); border: 1px solid rgba(185, 28, 28, 0.7); color: #fecaca; font-size: 12px; display: none; }
+    .error-box { margin-top: 8px; padding: 10px 14px; border-radius: 10px; background: rgba(127, 29, 29, 0.5); border: 1px solid rgba(185, 28, 28, 0.7); color: #fecaca; font-size: 12px; display: none; }
     footer { padding: 0 24px 24px; }
-    .tray { max-width: 560px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 190px; overflow-y: auto; }
+    .tray { max-width: 600px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 190px; overflow-y: auto; }
     .tray-empty { text-align: center; color: #64748b; font-size: 12px; }
     .file-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 4px; border-bottom: 1px solid #1e293b; }
     .file-row:last-child { border-bottom: none; }
     .file-name { font-size: 14px; font-weight: 600; color: #f8fafc; }
     .file-meta { font-size: 12px; color: #94a3b8; margin-top: 2px; }
-    .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .btn-group { display: flex; align-items: center; gap: 6px; }
+    .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
     .dl-btn:hover { background: #10b981; }
+    .dl-btn.alt { background: #334155; color: #e2e8f0; }
+    .dl-btn.alt:hover { background: #475569; }
   </style>
 </head>
 <body>
@@ -53,10 +61,21 @@ const html = `<!DOCTYPE html>
   <main>
     <div class="center-box">
       <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.txt" style="display:none" />
+      <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
       <button class="main-btn" onclick="document.getElementById('fileInput').click()">
         <span class="main-btn-title">Исправить русский язык</span>
         <span class="main-btn-sub">Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)</span>
       </button>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <button class="main-btn ocr-btn" onclick="document.getElementById('ocrInput').click()">
+          <span class="main-btn-title">Распознать PDF (картинку)</span>
+          <span class="main-btn-sub" id="ocrBtnSub">PDF · PNG · JPG · TIFF → Word (.docx) или Excel (.xlsx)</span>
+        </button>
+        <div class="format-switch">
+          <button type="button" class="fmt-opt active" id="fmtDocx">Выдать Word (.docx)</button>
+          <button type="button" class="fmt-opt" id="fmtXlsx">Выдать Excel (.xlsx)</button>
+        </div>
+      </div>
       <div class="progress-wrap" id="progressWrap">
         <div style="display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;">
           <span id="progressLabel">Проверка...</span>

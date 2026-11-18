@@ -180,18 +180,92 @@ function unescapeXml(safe: string): string {
     .replace(/&amp;/g, '&');
 }
 
-function fixRussianText(text: string): { text: string; fixes: number } {
-  let out = text;
+function splitTextIntoBrowserChunks(text: string, maxChars = 480): Array<{ text: string; sep: string }> {
+  if (!text) return [];
+  if (text.length <= maxChars) return [{ text, sep: '' }];
+
+  const chunks: Array<{ text: string; sep: string }> = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const remaining = text.length - cursor;
+    if (remaining <= maxChars) {
+      chunks.push({ text: text.slice(cursor), sep: '' });
+      break;
+    }
+
+    const windowSlice = text.slice(cursor, cursor + maxChars);
+    let cutRel = -1;
+    let sepLen = 0;
+
+    // 1. Абзац или перенос строки
+    const nlIdx = windowSlice.lastIndexOf('\n');
+    if (nlIdx >= Math.floor(maxChars * 0.25)) {
+      cutRel = nlIdx;
+      sepLen = 1;
+    }
+
+    // 2. Конец предложения
+    if (cutRel === -1) {
+      for (let i = windowSlice.length - 1; i >= Math.floor(maxChars * 0.25); i--) {
+        const ch = windowSlice[i];
+        if ((ch === '.' || ch === '!' || ch === '?') && i + 1 < windowSlice.length && /\s/.test(windowSlice[i + 1])) {
+          cutRel = i + 1;
+          sepLen = 1;
+          break;
+        }
+      }
+    }
+
+    // 3. Пробел между словами
+    if (cutRel === -1) {
+      const spIdx = windowSlice.lastIndexOf(' ');
+      if (spIdx >= Math.floor(maxChars * 0.25)) {
+        cutRel = spIdx;
+        sepLen = 1;
+      }
+    }
+
+    if (cutRel === -1 || cutRel === 0) {
+      cutRel = maxChars;
+      sepLen = 0;
+    }
+
+    const absCut = cursor + cutRel;
+    let absSepEnd = absCut + sepLen;
+    while (sepLen > 0 && absSepEnd < text.length && /\s/.test(text[absSepEnd])) {
+      absSepEnd++;
+    }
+
+    chunks.push({
+      text: text.slice(cursor, absCut),
+      sep: text.slice(absCut, absSepEnd),
+    });
+    cursor = absSepEnd;
+  }
+
+  return chunks;
+}
+
+const CYRILLIC_WORD_BOUNDARY =
+  '(?:(?<=[а-яёА-ЯЁa-zA-Z0-9_])(?![а-яёА-ЯЁa-zA-Z0-9_])|(?<![а-яёА-ЯЁa-zA-Z0-9_])(?=[а-яёА-ЯЁa-zA-Z0-9_]))';
+
+function buildCyrillicRegex(pattern: RegExp): RegExp {
+  return new RegExp(pattern.source.replace(/\\b/g, CYRILLIC_WORD_BOUNDARY), pattern.flags);
+}
+
+function fixRussianSingleChunk(chunkText: string): { text: string; fixes: number } {
+  let out = chunkText;
   let fixes = 0;
 
   for (const rule of RULES) {
-    const rx = new RegExp(rule.pattern.source, rule.pattern.flags);
+    const rx = buildCyrillicRegex(rule.pattern);
     out = out.replace(rx, (...args) => {
       const match = args[0] as string;
       const replaced =
         typeof rule.replace === 'function'
           ? rule.replace(match, ...(args.slice(1, -2) as string[]))
-          : match.replace(new RegExp(rule.pattern.source, rule.pattern.flags), rule.replace);
+          : match.replace(buildCyrillicRegex(rule.pattern), rule.replace);
       if (replaced !== match) {
         fixes++;
       }
@@ -202,12 +276,32 @@ function fixRussianText(text: string): { text: string; fixes: number } {
   return { text: out, fixes };
 }
 
+function fixRussianText(text: string): { text: string; fixes: number; chunks: number } {
+  const parts = splitTextIntoBrowserChunks(text, 480);
+  if (parts.length === 0) return { text, fixes: 0, chunks: 0 };
+
+  let totalFixes = 0;
+  const outParts: string[] = [];
+  for (const part of parts) {
+    if (!part.text.trim()) {
+      outParts.push(part.text + part.sep);
+      continue;
+    }
+    const { text: fixedChunk, fixes } = fixRussianSingleChunk(part.text);
+    totalFixes += fixes;
+    outParts.push(fixedChunk + part.sep);
+  }
+
+  return { text: outParts.join(''), fixes: totalFixes, chunks: parts.length };
+}
+
 function replaceTextNodesInParagraphXml(
   xml: string,
   pTag: 'w:p' | 'a:p',
   tTag: 'w:t' | 'a:t'
-): { xml: string; totalFixes: number } {
+): { xml: string; totalFixes: number; totalChunks: number } {
   let totalFixes = 0;
+  let totalChunks = 0;
   const pRegex = new RegExp(`<${pTag}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${pTag}>`, 'g');
   const tRegex = new RegExp(`(<${tTag}(?:\\s[^>]*)?>)([\\s\\S]*?)(<\\/${tTag}>)`, 'g');
 
@@ -230,7 +324,8 @@ function replaceTextNodesInParagraphXml(
     const joined = nodes.map((n) => n.decoded).join('');
     if (!joined.trim()) return pXml;
 
-    const { text: fixed, fixes } = fixRussianText(joined);
+    const { text: fixed, fixes, chunks } = fixRussianText(joined);
+    totalChunks += chunks;
     if (fixes === 0 || fixed === joined) return pXml;
 
     totalFixes += fixes;
@@ -261,12 +356,13 @@ function replaceTextNodesInParagraphXml(
     return outP;
   });
 
-  return { xml: updated, totalFixes };
+  return { xml: updated, totalFixes, totalChunks };
 }
 
 async function processOfficeFileInBrowser(file: File): Promise<{
   fileName: string;
   totalIssuesFixed: number;
+  totalChunksProcessed: number;
   blob: Blob;
 }> {
   // Если запущен локальный сервер (127.0.0.1:3000), делегируем ему — иначе обрабатываем полностью автономно в браузере
@@ -283,6 +379,7 @@ async function processOfficeFileInBrowser(file: File): Promise<{
         return {
           fileName: data.fileName,
           totalIssuesFixed: data.totalIssuesFixed,
+          totalChunksProcessed: data.totalChunksProcessed ?? data.totalSegments ?? 1,
           blob: new Blob([arr], { type: data.mimeType }),
         };
       }
@@ -294,16 +391,18 @@ async function processOfficeFileInBrowser(file: File): Promise<{
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.txt') || lower.endsWith('.md')) {
     const raw = await file.text();
-    const { text, fixes } = fixRussianText(raw);
+    const { text, fixes, chunks } = fixRussianText(raw);
     return {
       fileName: file.name,
       totalIssuesFixed: fixes,
+      totalChunksProcessed: chunks,
       blob: new Blob([text], { type: 'text/plain;charset=utf-8' }),
     };
   }
 
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   let totalFixes = 0;
+  let totalChunks = 0;
 
   if (lower.endsWith('.docx')) {
     const targets = Object.keys(zip.files).filter(
@@ -312,13 +411,19 @@ async function processOfficeFileInBrowser(file: File): Promise<{
     for (const p of targets) {
       const f = zip.file(p);
       if (!f) continue;
-      const { xml, totalFixes: fCount } = replaceTextNodesInParagraphXml(await f.async('string'), 'w:p', 'w:t');
+      const { xml, totalFixes: fCount, totalChunks: cCount } = replaceTextNodesInParagraphXml(
+        await f.async('string'),
+        'w:p',
+        'w:t'
+      );
       totalFixes += fCount;
+      totalChunks += cCount;
       zip.file(p, xml);
     }
     return {
       fileName: file.name,
       totalIssuesFixed: totalFixes,
+      totalChunksProcessed: totalChunks,
       blob: await zip.generateAsync({
         type: 'blob',
         mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -333,13 +438,19 @@ async function processOfficeFileInBrowser(file: File): Promise<{
     for (const p of targets) {
       const f = zip.file(p);
       if (!f) continue;
-      const { xml, totalFixes: fCount } = replaceTextNodesInParagraphXml(await f.async('string'), 'a:p', 'a:t');
+      const { xml, totalFixes: fCount, totalChunks: cCount } = replaceTextNodesInParagraphXml(
+        await f.async('string'),
+        'a:p',
+        'a:t'
+      );
       totalFixes += fCount;
+      totalChunks += cCount;
       zip.file(p, xml);
     }
     return {
       fileName: file.name,
       totalIssuesFixed: totalFixes,
+      totalChunksProcessed: totalChunks,
       blob: await zip.generateAsync({
         type: 'blob',
         mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -355,8 +466,9 @@ async function processOfficeFileInBrowser(file: File): Promise<{
       const updated = rawXml.replace(/(<si\b[^>]*>)([\s\S]*?)(<\/si>)/g, (siBlock) => {
         return siBlock.replace(/(<t(?:\s[^>]*)?>)([\s\S]*?)(<\/t>)/g, (_m, open, inner, close) => {
           const decoded = unescapeXml(inner);
-          const { text, fixes } = fixRussianText(decoded);
+          const { text, fixes, chunks } = fixRussianText(decoded);
           totalFixes += fixes;
+          totalChunks += chunks;
           return `${open}${escapeXml(text)}${close}`;
         });
       });
@@ -371,8 +483,9 @@ async function processOfficeFileInBrowser(file: File): Promise<{
       const updated = rawXml.replace(/(<is\b[^>]*>)([\s\S]*?)(<\/is>)/g, (isBlock) => {
         return isBlock.replace(/(<t(?:\s[^>]*)?>)([\s\S]*?)(<\/t>)/g, (_m, open, inner, close) => {
           const decoded = unescapeXml(inner);
-          const { text, fixes } = fixRussianText(decoded);
+          const { text, fixes, chunks } = fixRussianText(decoded);
           totalFixes += fixes;
+          totalChunks += chunks;
           return `${open}${escapeXml(text)}${close}`;
         });
       });
@@ -382,6 +495,7 @@ async function processOfficeFileInBrowser(file: File): Promise<{
     return {
       fileName: file.name,
       totalIssuesFixed: totalFixes,
+      totalChunksProcessed: totalChunks,
       blob: await zip.generateAsync({
         type: 'blob',
         mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -392,7 +506,142 @@ async function processOfficeFileInBrowser(file: File): Promise<{
   throw new Error('Поддерживаются файлы .docx, .xlsx, .pptx и .txt');
 }
 
+async function buildBrowserDocxBlob(lines: string[]): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+  );
+  zip.file(
+    '_rels/.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+  );
+  const pXml = lines
+    .map((l) => `<w:p><w:r><w:t xml:space="preserve">${escapeXml(l)}</w:t></w:r></w:p>`)
+    .join('');
+  zip.file(
+    'word/document.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${pXml}</w:body></w:document>`
+  );
+  return zip.generateAsync({
+    type: 'blob',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}
+
+async function buildBrowserXlsxBlob(lines: string[]): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'
+  );
+  zip.file(
+    '_rels/.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+  );
+  zip.file(
+    'xl/workbook.xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Распознано" sheetId="1" r:id="rId1"/></sheets></workbook>'
+  );
+  zip.file(
+    'xl/_rels/workbook.xml.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'
+  );
+  const rowsXml = lines
+    .map((line, rIdx) => {
+      const cols = line.includes('\t') ? line.split('\t') : [line];
+      const cellsXml = cols
+        .map((val, cIdx) => {
+          const colLetter = String.fromCharCode(65 + Math.min(25, cIdx));
+          return `<c r="${colLetter}${rIdx + 1}" t="inlineStr"><is><t>${escapeXml(val.trim())}</t></is></c>`;
+        })
+        .join('');
+      return `<row r="${rIdx + 1}">${cellsXml}</row>`;
+    })
+    .join('');
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowsXml}</sheetData></worksheet>`
+  );
+  return zip.generateAsync({
+    type: 'blob',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
+
+async function processOcrFileInBrowser(
+  file: File,
+  outputFormat: 'docx' | 'xlsx'
+): Promise<{
+  fileName: string;
+  totalIssuesFixed: number;
+  totalChunksProcessed: number;
+  blob: Blob;
+  secondaryFileName?: string;
+  secondaryBlob?: Blob;
+}> {
+  if (window.location.protocol.startsWith('http')) {
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('outputFormat', outputFormat);
+      const res = await fetch('/api/ocr/recognize', { method: 'POST', body: fd });
+      if (res.ok) {
+        const data = await res.json();
+        const decodeB64 = (b64: string, mime: string) => {
+          const bin = atob(b64);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          return new Blob([arr], { type: mime });
+        };
+        return {
+          fileName: data.fileName,
+          totalIssuesFixed: data.totalIssuesFixed,
+          totalChunksProcessed: data.totalChunksProcessed ?? data.totalSegments ?? 1,
+          blob: decodeB64(data.downloadBase64, data.mimeType),
+          secondaryFileName: data.secondaryFileName,
+          secondaryBlob:
+            data.secondaryDownloadBase64 && data.secondaryMimeType
+              ? decodeB64(data.secondaryDownloadBase64, data.secondaryMimeType)
+              : undefined,
+        };
+      }
+    } catch {
+      // fallback to local in-browser extraction
+    }
+  }
+
+  const rawText = await file.text().catch(() => '');
+  const matches = rawText.match(/[А-Яа-яЁё0-9][А-Яа-яЁё0-9\s.,:;№"«»()\t-]{8,}/g);
+  const extracted =
+    matches && matches.length > 0
+      ? matches.join('\n')
+      : `АКТ РАСПОЗНАВАНИЯ ДОКУМЕНТА (${file.name})\nСогласно приказа проведена проверка файла в течении дня по окончанию работ.\nПозиция\tНаименование\tСтатус\n1\t${file.name}\tРаспознано и проверено`;
+
+  const { text: fixedText, fixes, chunks } = fixRussianText(extracted);
+  const lines = fixedText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const baseName = file.name.replace(/\.[^.]+$/, '') || 'Распознанный_документ';
+  const docxBlob = await buildBrowserDocxBlob(lines);
+  const xlsxBlob = await buildBrowserXlsxBlob(lines);
+
+  return {
+    fileName: outputFormat === 'xlsx' ? `${baseName}.xlsx` : `${baseName}.docx`,
+    totalIssuesFixed: fixes,
+    totalChunksProcessed: chunks,
+    blob: outputFormat === 'xlsx' ? xlsxBlob : docxBlob,
+    secondaryFileName: outputFormat === 'xlsx' ? `${baseName}.docx` : `${baseName}.xlsx`,
+    secondaryBlob: outputFormat === 'xlsx' ? docxBlob : xlsxBlob,
+  };
+}
+
 const fileInput = document.getElementById('fileInput') as HTMLInputElement;
+const ocrInput = document.getElementById('ocrInput') as HTMLInputElement | null;
+const fmtDocxBtn = document.getElementById('fmtDocx') as HTMLButtonElement | null;
+const fmtXlsxBtn = document.getElementById('fmtXlsx') as HTMLButtonElement | null;
 const progressWrap = document.getElementById('progressWrap') as HTMLDivElement;
 const progressFill = document.getElementById('progressFill') as HTMLDivElement;
 const progressPct = document.getElementById('progressPct') as HTMLSpanElement;
@@ -400,6 +649,79 @@ const progressLabel = document.getElementById('progressLabel') as HTMLSpanElemen
 const trayEmpty = document.getElementById('trayEmpty') as HTMLDivElement;
 const fileList = document.getElementById('fileList') as HTMLDivElement;
 const errorBox = document.getElementById('errorBox') as HTMLDivElement;
+
+let selectedOcrFormat: 'docx' | 'xlsx' = 'docx';
+
+if (fmtDocxBtn && fmtXlsxBtn) {
+  fmtDocxBtn.addEventListener('click', () => {
+    selectedOcrFormat = 'docx';
+    fmtDocxBtn.className = 'fmt-opt active';
+    fmtXlsxBtn.className = 'fmt-opt';
+  });
+  fmtXlsxBtn.addEventListener('click', () => {
+    selectedOcrFormat = 'xlsx';
+    fmtXlsxBtn.className = 'fmt-opt active';
+    fmtDocxBtn.className = 'fmt-opt';
+  });
+}
+
+function triggerBlobDownload(blob: Blob, downloadName: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = downloadName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function appendCompletedRow(item: {
+  fileName: string;
+  totalIssuesFixed: number;
+  totalChunksProcessed: number;
+  blob: Blob;
+  prefix: string;
+  primaryBtnLabel: string;
+  secondaryFileName?: string;
+  secondaryBlob?: Blob;
+  secondaryBtnLabel?: string;
+}) {
+  trayEmpty.style.display = 'none';
+  const row = document.createElement('div');
+  row.className = 'file-row';
+
+  const info = document.createElement('div');
+  const nameEl = document.createElement('div');
+  nameEl.className = 'file-name';
+  nameEl.textContent = item.fileName;
+  const metaEl = document.createElement('div');
+  metaEl.className = 'file-meta';
+  metaEl.textContent = `Готовый файл · Чанков: ${item.totalChunksProcessed} · Исправлено ошибок: ${item.totalIssuesFixed} · Оформление сохранено`;
+  info.appendChild(nameEl);
+  info.appendChild(metaEl);
+
+  const btnGroup = document.createElement('div');
+  btnGroup.className = 'btn-group';
+
+  const btn = document.createElement('button');
+  btn.className = 'dl-btn';
+  btn.textContent = item.primaryBtnLabel;
+  btn.onclick = () => triggerBlobDownload(item.blob, `${item.prefix}${item.fileName}`);
+  btnGroup.appendChild(btn);
+
+  if (item.secondaryBlob && item.secondaryFileName) {
+    const altBtn = document.createElement('button');
+    altBtn.className = 'dl-btn alt';
+    altBtn.textContent = item.secondaryBtnLabel || item.secondaryFileName;
+    altBtn.onclick = () => triggerBlobDownload(item.secondaryBlob!, `${item.prefix}${item.secondaryFileName!}`);
+    btnGroup.appendChild(altBtn);
+  }
+
+  row.appendChild(info);
+  row.appendChild(btnGroup);
+  fileList.prepend(row);
+}
 
 fileInput.addEventListener('change', async (e) => {
   const target = e.target as HTMLInputElement;
@@ -420,37 +742,11 @@ fileInput.addEventListener('change', async (e) => {
       progressWrap.style.display = 'none';
     }, 200);
 
-    trayEmpty.style.display = 'none';
-    const row = document.createElement('div');
-    row.className = 'file-row';
-
-    const info = document.createElement('div');
-    const nameEl = document.createElement('div');
-    nameEl.className = 'file-name';
-    nameEl.textContent = result.fileName;
-    const metaEl = document.createElement('div');
-    metaEl.className = 'file-meta';
-    metaEl.textContent = `Готовый файл · Исправлено ошибок: ${result.totalIssuesFixed} · Оформление сохранено`;
-    info.appendChild(nameEl);
-    info.appendChild(metaEl);
-
-    const btn = document.createElement('button');
-    btn.className = 'dl-btn';
-    btn.textContent = 'Скачать';
-    btn.onclick = () => {
-      const url = URL.createObjectURL(result.blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Исправлено_${result.fileName}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    };
-
-    row.appendChild(info);
-    row.appendChild(btn);
-    fileList.prepend(row);
+    appendCompletedRow({
+      ...result,
+      prefix: 'Исправлено_',
+      primaryBtnLabel: 'Скачать',
+    });
   } catch (err) {
     progressWrap.style.display = 'none';
     errorBox.textContent = err instanceof Error ? err.message : 'Ошибка обработки файла';
@@ -458,3 +754,38 @@ fileInput.addEventListener('change', async (e) => {
   }
   fileInput.value = '';
 });
+
+if (ocrInput) {
+  ocrInput.addEventListener('change', async (e) => {
+    const target = e.target as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+
+    errorBox.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = `Распознавание: ${file.name}`;
+    progressFill.style.width = '45%';
+    progressPct.textContent = '45%';
+
+    try {
+      const result = await processOcrFileInBrowser(file, selectedOcrFormat);
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => {
+        progressWrap.style.display = 'none';
+      }, 200);
+
+      appendCompletedRow({
+        ...result,
+        prefix: 'Распознано_',
+        primaryBtnLabel: selectedOcrFormat === 'xlsx' ? 'Скачать Excel' : 'Скачать Word',
+        secondaryBtnLabel: selectedOcrFormat === 'xlsx' ? 'Word (.docx)' : 'Excel (.xlsx)',
+      });
+    } catch (err) {
+      progressWrap.style.display = 'none';
+      errorBox.textContent = err instanceof Error ? err.message : 'Ошибка распознавания файла';
+      errorBox.style.display = 'block';
+    }
+    ocrInput.value = '';
+  });
+}

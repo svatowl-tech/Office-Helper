@@ -62,7 +62,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \`
             -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \`
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \`
-            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \`
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_CCACHE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \`
             ${simdFlags}
           cmake --build build-win8plus --config Release --target llama-server --parallel
           \$exe = Get-ChildItem -Path build-win8plus -Filter "llama-server.exe" -Recurse | Select-Object -First 1
@@ -101,11 +101,12 @@ jobs:
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp
           mkdir -p dist-airgap/bin/linux-x64-avx2 dist-airgap/bin/win8plus-x64
           docker run --rm -v /tmp/llama-cpp:/llama -v "\${{ github.workspace }}/dist-airgap:/out" alpine:3.20 sh -c '
-            apk add --no-cache build-base cmake linux-headers && \\
-            cmake -B /tmp/build-sse -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
+            apk add --no-cache build-base cmake git linux-headers && \\
+            git config --global --add safe.directory /llama && \\
+            cmake -B /tmp/build-sse -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CCACHE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
             cmake --build /tmp/build-sse --target llama-server -j$(nproc) && \\
             cp /tmp/build-sse/bin/llama-server /out/bin/linux-x64/llama-server && \\
-            cmake -B /tmp/build-avx2 -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
+            cmake -B /tmp/build-avx2 -S /llama -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CCACHE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=OFF -DGGML_SSE42=ON -DCMAKE_EXE_LINKER_FLAGS="-static" && \\
             cmake --build /tmp/build-avx2 --target llama-server -j$(nproc) && \\
             cp /tmp/build-avx2/bin/llama-server /out/bin/linux-x64-avx2/llama-server
           '
@@ -120,7 +121,7 @@ jobs:
 
       - name: "6. Кросс-компиляция llama-server.exe под Windows 7 SP1 x64 (_WIN32_WINNT=0x0601 + CreateFileW/CreateFileMappingW/MapViewOfFile)"
         run: |
-          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::MapViewOfFileFromApp\\s*\\([^;]*?\\)\\s*;', '::MapViewOfFile(hMapping_, FILE_MAP_READ, 0, 0, 0);', re.sub(r'::CreateFileMappingFromApp\\s*\\([^;]*?\\)\\s*;', '::CreateFileMappingW(hFile_, NULL, PAGE_READONLY, static_cast<DWORD>(size.HighPart), static_cast<DWORD>(size.LowPart), NULL);', re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#if\\s+defined\\s*\\(\\s*_WIN32_WINNT\\s*\\)\\s*&&\\s*_WIN32_WINNT\\s*<\\s*0x0A00\\b.*?#endif', '// Win7 patch', open(p).read(), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]"
+          python3 -c "import glob,re; [open(p,'w').write(re.sub(r'::MapViewOfFileFromApp\\s*\\([^;]*?\\)\\s*;', '::MapViewOfFile(hMapping_, FILE_MAP_READ, 0, 0, 0);', re.sub(r'::CreateFileMappingFromApp\\s*\\([^;]*?\\)\\s*;', '::CreateFileMappingW(hFile_, NULL, PAGE_READONLY, static_cast<DWORD>(size.HighPart), static_cast<DWORD>(size.LowPart), NULL);', re.sub(r'::CreateFile2\\s*\\([^;]*?\\)\\s*;', '::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);', re.sub(r'#if\\s+defined\\s*\\(\\s*_WIN32_WINNT\\s*\\)\\s*&&\\s*_WIN32_WINNT\\s*<\\s*0x0A00\\b.*?#endif', '// Win7 patch', open(p).read(), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL), flags=re.DOTALL)) for p in glob.glob('/tmp/llama-cpp/**/httplib.*', recursive=True)]; [open(p,'w').write(open(p).read().replace('pipeTypeByte | pipeWait, 1, 4096, 4096, SUBPROCESS_NULL,', 'pipeTypeByte | pipeWait, 1, 4096, 4096, 0,').replace('*wr = CreateFileA(name, genericWrite, SUBPROCESS_NULL,', '*wr = CreateFileA(name, genericWrite, 0,').replace('commandLine[i][0] == SUBPROCESS_NULL;', \"commandLine[i][0] == '\\\\0';\")) for p in glob.glob('/tmp/llama-cpp/**/subprocess.h', recursive=True)]; [open(p,'w').write(re.sub(r'(impl\\s*\\(\\s*struct\\s+llama_file\\s*\\*\\s*file\\s*,\\s*size_t\\s+prefetch\\s*,\\s*bool\\s+numa\\s*,\\s*const\\s+llama_mmap::ranges\\s*&\\s*lazy_ranges\\s*\\)\\s*\\{\\s*GGML_UNUSED\\s*\\(\\s*numa\\s*\\)\\s*;)', r'\\1 GGML_UNUSED(lazy_ranges);', open(p).read())) for p in glob.glob('/tmp/llama-cpp/**/llama-mmap.cpp', recursive=True)]"
           cmake -B /tmp/llama-cpp/build-win7 -S /tmp/llama-cpp \\
             -DCMAKE_SYSTEM_NAME=Windows \\
             -DCMAKE_SYSTEM_PROCESSOR=x86_64 \\
@@ -129,7 +130,7 @@ jobs:
             -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601" \\
             -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601 -DWINVER=0x0601" \\
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread" \\
-            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_WEBUI=OFF \\
+            -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_CCACHE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \\
             ${simdFlags}
           cmake --build /tmp/llama-cpp/build-win7 --target llama-server -j\$(nproc)
           cp /tmp/llama-cpp/build-win7/bin/llama-server.exe dist-airgap/bin/win7-x64/llama-server.exe

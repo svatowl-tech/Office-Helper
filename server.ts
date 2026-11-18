@@ -6,6 +6,10 @@ import os from 'os';
 import { spawn, execFile, ChildProcess } from 'child_process';
 import { proofreadRussianText } from './server/services/russianProofreader.service.ts';
 import {
+  DEFAULT_HARNESS_CHUNKING_CONFIG,
+  splitTextIntoHarnessChunks,
+} from './server/services/textChunker.service.ts';
+import {
   generateSampleDocxWithErrors,
   generateSampleXlsxWithErrors,
   processDocxBuffer,
@@ -23,7 +27,11 @@ import {
   generateGithubWorkflowYaml,
   generateWindows7LauncherScript,
 } from './server/services/githubBundleGenerator.service.ts';
-import { GithubBundleConfig } from './src/types/harness.types.ts';
+import {
+  generateSamplePdfWithRussianTable,
+  processPdfOrImageToOffice,
+} from './server/services/ocrDocument.service.ts';
+import { GithubBundleConfig, OcrOutputFormat } from './src/types/harness.types.ts';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -39,16 +47,21 @@ async function startServer() {
 
   app.use(express.json({ limit: '15mb' }));
 
-  // 1. Проверка текста на русском языке (инлайн-редактор и постобработка OCR)
+  // 1. Проверка текста на русском языке (с автоматическим разбиением длинных текстов на чанки под малое окно контекста)
   app.post('/api/proofread/text', async (req: Request, res: Response) => {
     try {
-      const { text } = req.body as { text?: string };
+      const { text, maxChunkChars } = req.body as { text?: string; maxChunkChars?: number };
       if (typeof text !== 'string') {
         res.status(400).json({ error: 'Поле text обязательно и должно быть строкой.' });
         return;
       }
       const startTime = Date.now();
-      const result = await proofreadRussianText(text);
+      const result = await proofreadRussianText(
+        text,
+        typeof maxChunkChars === 'number' && maxChunkChars >= 80
+          ? { maxChunkChars }
+          : undefined
+      );
       res.json({
         ...result,
         processingTimeMs: Math.max(4, Date.now() - startTime),
@@ -59,7 +72,35 @@ async function startServer() {
     }
   });
 
-  // 2. Загрузка и коррекция реального файла .docx / .xlsx с сохранением 100% форматирования
+  // 1.1. Стандартный сервис разбиения длинных текстов на чанки (для масштабирования на все инструменты Харнеса)
+  app.post('/api/chunker/split', (req: Request, res: Response) => {
+    try {
+      const { text, maxChunkChars } = req.body as { text?: string; maxChunkChars?: number };
+      if (typeof text !== 'string') {
+        res.status(400).json({ error: 'Поле text обязательно и должно быть строкой.' });
+        return;
+      }
+      const chunks = splitTextIntoHarnessChunks(
+        text,
+        typeof maxChunkChars === 'number' && maxChunkChars >= 80
+          ? { maxChunkChars }
+          : undefined
+      );
+      res.json({
+        totalChunks: chunks.length,
+        config: {
+          ...DEFAULT_HARNESS_CHUNKING_CONFIG,
+          ...(typeof maxChunkChars === 'number' && maxChunkChars >= 80 ? { maxChunkChars } : {}),
+        },
+        chunks,
+      });
+    } catch (err) {
+      console.error('Ошибка разбиения текста на чанки:', err);
+      res.status(500).json({ error: 'Не удалось разбить текст на чанки.' });
+    }
+  });
+
+  // 2. Загрузка и коррекция реального файла .docx / .xlsx / .pptx / .txt с сохранением 100% форматирования и чанкингом
   app.post('/api/proofread/document', upload.single('file'), async (req: Request, res: Response) => {
     try {
       const file = req.file;
@@ -101,17 +142,19 @@ async function startServer() {
           fileSizeBytes: outBuffer.length,
           processingTimeMs: Math.max(5, Date.now() - startTime),
           engineUsed: proofread.engineUsed,
-          totalSegments: 1,
+          totalSegments: proofread.totalChunksProcessed || 1,
           modifiedSegments: proofread.issues.length > 0 ? 1 : 0,
           totalIssuesFixed: proofread.issues.length,
+          totalChunksProcessed: proofread.totalChunksProcessed,
+          chunkMaxCharsUsed: proofread.chunkMaxCharsUsed,
           segments: [
             {
               id: 'txt-seg-1',
-              location: 'Текстовый документ (UTF-8)',
+              location: `Текстовый документ (UTF-8, ${proofread.totalChunksProcessed} чанков)`,
               elementType: 'paragraph',
               originalText: rawText,
               correctedText: proofread.correctedText,
-              preservedFormattingMeta: 'Кодировка UTF-8, переводы строк сохранены',
+              preservedFormattingMeta: `Кодировка UTF-8, обработано по чанкам (${proofread.totalChunksProcessed} фр.)`,
               issues: proofread.issues,
               applied: proofread.issues.length > 0,
             },
@@ -156,6 +199,47 @@ async function startServer() {
     } catch (err) {
       console.error('Ошибка генерации образца:', err);
       res.status(500).json({ error: 'Не удалось сформировать демонстрационный документ.' });
+    }
+  });
+
+  // 3.1. Распознавание PDF или картинки (.pdf, .png, .jpg, .jpeg, .bmp, .tiff, .webp) с чанкингом и выдачей Word (.docx) или Excel (.xlsx)
+  app.post('/api/ocr/recognize', upload.single('file'), async (req: Request, res: Response) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ error: 'Файл PDF или изображения не передан.' });
+        return;
+      }
+
+      const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+      const rawFormat = String(req.body?.outputFormat || 'docx').toLowerCase();
+      const outputFormat: OcrOutputFormat = rawFormat === 'xlsx' ? 'xlsx' : 'docx';
+
+      const result = await processPdfOrImageToOffice(file.buffer, originalName, outputFormat);
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка распознавания PDF/изображения:', err);
+      res.status(500).json({
+        error: 'Не удалось распознать файл и сформировать документ Word/Excel.',
+      });
+    }
+  });
+
+  // 3.2. Демонстрационное распознавание тестового PDF с таблицей в Word (.docx) или Excel (.xlsx)
+  app.post('/api/ocr/sample', async (req: Request, res: Response) => {
+    try {
+      const rawFormat = String(req.body?.outputFormat || 'docx').toLowerCase();
+      const outputFormat: OcrOutputFormat = rawFormat === 'xlsx' ? 'xlsx' : 'docx';
+      const pdfBuf = generateSamplePdfWithRussianTable();
+      const result = await processPdfOrImageToOffice(
+        pdfBuf,
+        'Скан_ведомости_ЗСПД_образец.pdf',
+        outputFormat
+      );
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка генерации тестового PDF OCR:', err);
+      res.status(500).json({ error: 'Не удалось выполнить тестовое распознавание PDF.' });
     }
   });
 
@@ -388,24 +472,32 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   body { background: #020617; color: #f1f5f9; height: 100vh; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; user-select: none; }
   header { padding: 24px; text-align: center; color: #94a3b8; font-size: 14px; font-weight: 500; }
   main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
-  .center-box { width: 100%; max-width: 440px; text-align: center; }
-  .main-btn { width: 100%; padding: 28px 32px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.25); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .center-box { width: 100%; max-width: 460px; text-align: center; display: flex; flex-direction: column; gap: 14px; }
+  .main-btn { width: 100%; padding: 22px 28px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.22); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .main-btn:hover { background: #0ea5e9; }
+  .main-btn.ocr-btn { background: #4f46e5; box-shadow: 0 10px 25px rgba(79,70,229,0.22); }
+  .main-btn.ocr-btn:hover { background: #6366f1; }
   .main-btn:disabled { opacity: 0.6; pointer-events: none; }
-  .main-btn-title { font-size: 20px; font-weight: 700; }
+  .main-btn-title { font-size: 19px; font-weight: 700; }
   .main-btn-sub { font-size: 12px; color: #e0f2fe; }
-  .progress-wrap { margin-top: 20px; display: none; }
+  .format-switch { display: inline-flex; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 3px; gap: 4px; margin-top: 4px; }
+  .fmt-opt { border: none; background: transparent; color: #94a3b8; font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer; }
+  .fmt-opt.active { background: #4f46e5; color: #fff; }
+  .progress-wrap { margin-top: 6px; display: none; }
   .progress-bar-bg { width: 100%; height: 8px; background: #0f172a; border: 1px solid #1e293b; border-radius: 999px; overflow: hidden; margin-top: 6px; }
   .progress-bar-fill { height: 100%; width: 0%; background: #0ea5e9; transition: width 0.15s; }
   footer { padding: 0 24px 24px; }
-  .tray { max-width: 560px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 180px; overflow-y: auto; }
+  .tray { max-width: 600px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 185px; overflow-y: auto; }
   .tray-empty { text-align: center; color: #64748b; font-size: 12px; }
   .file-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 4px; border-bottom: 1px solid #1e293b; }
   .file-row:last-child { border-bottom: none; }
   .file-name { font-size: 14px; font-weight: 600; color: #f8fafc; }
   .file-meta { font-size: 12px; color: #94a3b8; margin-top: 2px; }
-  .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn-group { display: flex; align-items: center; gap: 6px; }
+  .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
   .dl-btn:hover { background: #10b981; }
+  .dl-btn.alt { background: #334155; color: #e2e8f0; }
+  .dl-btn.alt:hover { background: #475569; }
 </style>
 </head>
 <body>
@@ -413,10 +505,21 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   <main>
     <div class="center-box">
       <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.txt" style="display:none" />
+      <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
       <button class="main-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()">
         <span class="main-btn-title">Исправить русский язык</span>
         <span class="main-btn-sub">Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)</span>
       </button>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <button class="main-btn ocr-btn" id="ocrBtn" onclick="document.getElementById('ocrInput').click()">
+          <span class="main-btn-title">Распознать PDF (картинку)</span>
+          <span class="main-btn-sub">PDF · PNG · JPG · TIFF → Word (.docx) или Excel (.xlsx)</span>
+        </button>
+        <div class="format-switch">
+          <button type="button" class="fmt-opt active" id="fmtDocx" onclick="setOcrFmt('docx')">Выдать Word (.docx)</button>
+          <button type="button" class="fmt-opt" id="fmtXlsx" onclick="setOcrFmt('xlsx')">Выдать Excel (.xlsx)</button>
+        </div>
+      </div>
       <div class="progress-wrap" id="progressWrap">
         <div style="display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;">
           <span id="progressLabel">Проверка...</span>
@@ -433,7 +536,14 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     </div>
   </footer>
 <script>
+  let ocrFormat = 'docx';
+  function setOcrFmt(fmt) {
+    ocrFormat = fmt;
+    document.getElementById('fmtDocx').className = 'fmt-opt' + (fmt === 'docx' ? ' active' : '');
+    document.getElementById('fmtXlsx').className = 'fmt-opt' + (fmt === 'xlsx' ? ' active' : '');
+  }
   const fileInput = document.getElementById('fileInput');
+  const ocrInput = document.getElementById('ocrInput');
   const progressWrap = document.getElementById('progressWrap');
   const progressFill = document.getElementById('progressFill');
   const progressPct = document.getElementById('progressPct');
@@ -441,11 +551,20 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   const trayEmpty = document.getElementById('trayEmpty');
   const fileList = document.getElementById('fileList');
 
-  fileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  function downloadBase64(b64, name, mime) {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const blob = new Blob([arr], { type: mime });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+  }
+
+  async function sendFile(file, endpoint, extraFields) {
     progressWrap.style.display = 'block';
-    progressLabel.textContent = 'Проверка: ' + file.name;
+    progressLabel.textContent = 'Обработка: ' + file.name;
     let pct = 15;
     progressFill.style.width = pct + '%';
     progressPct.textContent = pct + '%';
@@ -456,7 +575,10 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await fetch('/api/proofread/document', { method: 'POST', body: formData });
+      if (extraFields) {
+        Object.keys(extraFields).forEach(k => formData.append(k, extraFields[k]));
+      }
+      const res = await fetch(endpoint, { method: 'POST', body: formData });
       const data = await res.json();
       clearInterval(timer);
       progressFill.style.width = '100%';
@@ -467,28 +589,41 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
         trayEmpty.style.display = 'none';
         const row = document.createElement('div');
         row.className = 'file-row';
-        row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
+        const chunksCount = data.totalChunksProcessed || data.totalSegments || 1;
+        row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
+        const group = document.createElement('div');
+        group.className = 'btn-group';
         const btn = document.createElement('button');
         btn.className = 'dl-btn';
-        btn.textContent = 'Скачать';
-        btn.onclick = () => {
-          const bin = atob(data.downloadBase64);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          const blob = new Blob([arr], { type: data.mimeType });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = 'Исправлено_' + data.fileName;
-          a.click();
-        };
-        row.appendChild(btn);
+        btn.textContent = data.operationMode === 'ocr' ? ('Скачать ' + data.fileType.toUpperCase()) : 'Скачать';
+        btn.onclick = () => downloadBase64(data.downloadBase64, (data.operationMode === 'ocr' ? 'Распознано_' : 'Исправлено_') + data.fileName, data.mimeType);
+        group.appendChild(btn);
+        if (data.secondaryDownloadBase64 && data.secondaryFileName) {
+          const altBtn = document.createElement('button');
+          altBtn.className = 'dl-btn alt';
+          altBtn.textContent = data.fileType === 'docx' ? 'Excel (.xlsx)' : 'Word (.docx)';
+          altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, 'Распознано_' + data.secondaryFileName, data.secondaryMimeType);
+          group.appendChild(altBtn);
+        }
+        row.appendChild(group);
         fileList.prepend(row);
       }
     } catch (err) {
       clearInterval(timer);
       progressWrap.style.display = 'none';
     }
+  }
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) await sendFile(file, '/api/proofread/document');
     fileInput.value = '';
+  });
+
+  ocrInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) await sendFile(file, '/api/ocr/recognize', { outputFormat: ocrFormat });
+    ocrInput.value = '';
   });
 </script>
 </body>

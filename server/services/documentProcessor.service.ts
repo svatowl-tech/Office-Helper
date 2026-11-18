@@ -80,7 +80,8 @@ function extractParagraphStyleSummary(pXml: string, runCount: number): string {
 async function processDocxXmlContent(
   xmlContent: string,
   sectionLabel: string,
-  segmentsCollector: DocumentSegment[]
+  segmentsCollector: DocumentSegment[],
+  chunkCounter: { count: number }
 ): Promise<string> {
   // Находим все абзацы <w:p ...>...</w:p>
   const paragraphRegex = /<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g;
@@ -127,6 +128,7 @@ async function processDocxXmlContent(
     paragraphIndex++;
     const isTable = pXml.includes('<w:tcPr') || sectionLabel.includes('Таблица');
     const proofread = await proofreadRussianText(fullParagraphText);
+    chunkCounter.count += Math.max(1, proofread.totalChunksProcessed);
     const styleSummary = extractParagraphStyleSummary(pXml, wtNodes.length);
 
     segmentsCollector.push({
@@ -212,6 +214,8 @@ export async function processDocxBuffer(
       /^word\/footer\d*\.xml$/.test(path)
   );
 
+  const chunkCounter = { count: 0 };
+
   for (const xmlPath of xmlFilesToProcess) {
     const fileObj = zip.file(xmlPath);
     if (!fileObj) continue;
@@ -224,7 +228,7 @@ export async function processDocxBuffer(
           ? 'Верхний колонтитул'
           : 'Нижний колонтитул';
 
-    const updatedXml = await processDocxXmlContent(rawXml, sectionLabel, segments);
+    const updatedXml = await processDocxXmlContent(rawXml, sectionLabel, segments, chunkCounter);
     zip.file(xmlPath, updatedXml);
   }
 
@@ -242,10 +246,12 @@ export async function processDocxBuffer(
     fileType: 'docx',
     fileSizeBytes: outBuffer.length,
     processingTimeMs: Math.max(12, Date.now() - startTime),
-    engineUsed: 'SAGE-FRED-T5-95M-INT8 + OpenXML Run-Preserving Engine',
+    engineUsed: 'SAGE-FRED-T5-95M-INT8 + OpenXML Chunked Run-Preserving Engine',
     totalSegments: segments.length,
     modifiedSegments,
     totalIssuesFixed,
+    totalChunksProcessed: chunkCounter.count,
+    chunkMaxCharsUsed: Number(process.env.HARNESS_CHUNK_MAX_CHARS) || 480,
     segments,
     downloadBase64: outBuffer.toString('base64'),
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -264,6 +270,7 @@ export async function processXlsxBuffer(
   await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);
 
   const segments: DocumentSegment[] = [];
+  let totalChunksProcessed = 0;
 
   for (const worksheet of workbook.worksheets) {
     const rows: ExcelJS.Row[] = [];
@@ -286,6 +293,7 @@ export async function processXlsxBuffer(
         if (typeof cell.value === 'string' && cell.value.trim().length > 0) {
           const originalText = cell.value;
           const proofread = await proofreadRussianText(originalText);
+          totalChunksProcessed += Math.max(1, proofread.totalChunksProcessed);
 
           const fontName = cell.font?.name || 'Calibri';
           const fontSize = cell.font?.size || 11;
@@ -324,6 +332,7 @@ export async function processXlsxBuffer(
           for (const part of richParts) {
             if (part.text && part.text.trim().length > 0) {
               const partProof = await proofreadRussianText(part.text);
+              totalChunksProcessed += Math.max(1, partProof.totalChunksProcessed);
               if (partProof.issues.length > 0) {
                 part.text = partProof.correctedText;
               }
@@ -356,10 +365,12 @@ export async function processXlsxBuffer(
     fileType: 'xlsx',
     fileSizeBytes: outBuffer.length,
     processingTimeMs: Math.max(15, Date.now() - startTime),
-    engineUsed: 'SAGE-FRED-T5-95M-INT8 + ExcelJS Style-Safe AST',
+    engineUsed: 'SAGE-FRED-T5-95M-INT8 + ExcelJS Chunked Style-Safe AST',
     totalSegments: segments.length,
     modifiedSegments,
     totalIssuesFixed,
+    totalChunksProcessed,
+    chunkMaxCharsUsed: Number(process.env.HARNESS_CHUNK_MAX_CHARS) || 480,
     segments,
     downloadBase64: outBuffer.toString('base64'),
     mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -517,7 +528,8 @@ export async function generateSampleXlsxWithErrors(): Promise<Buffer> {
 async function processPptxSlideXmlContent(
   xmlContent: string,
   slideLabel: string,
-  segmentsCollector: DocumentSegment[]
+  segmentsCollector: DocumentSegment[],
+  chunkCounter: { count: number }
 ): Promise<string> {
   const paragraphRegex = /<a:p(?:\s[^>]*)?>[\s\S]*?<\/a:p>/g;
   let match: RegExpExecArray | null;
@@ -561,6 +573,7 @@ async function processPptxSlideXmlContent(
 
     paragraphIndex++;
     const proofread = await proofreadRussianText(fullParagraphText);
+    chunkCounter.count += Math.max(1, proofread.totalChunksProcessed);
 
     segmentsCollector.push({
       id: `pptx-seg-${segmentsCollector.length + 1}`,
@@ -631,6 +644,8 @@ export async function processPptxBuffer(
     .filter((p) => /^ppt\/slides\/slide\d+\.xml$/.test(p) || /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(p))
     .sort();
 
+  const chunkCounter = { count: 0 };
+
   for (const xmlPath of slideXmlPaths) {
     const fileObj = zip.file(xmlPath);
     if (!fileObj) continue;
@@ -641,7 +656,7 @@ export async function processPptxBuffer(
       ? `Заметки к слайду #${slideNumMatch ? slideNumMatch[1] : ''}`
       : `Слайд #${slideNumMatch ? slideNumMatch[1] : ''}`;
 
-    const updatedXml = await processPptxSlideXmlContent(rawXml, slideLabel, segments);
+    const updatedXml = await processPptxSlideXmlContent(rawXml, slideLabel, segments, chunkCounter);
     zip.file(xmlPath, updatedXml);
   }
 
@@ -659,10 +674,12 @@ export async function processPptxBuffer(
     fileType: 'pptx',
     fileSizeBytes: outBuffer.length,
     processingTimeMs: Math.max(14, Date.now() - startTime),
-    engineUsed: 'SAGE-FRED-T5-95M-INT8 + PresentationML Slide-Safe Engine',
+    engineUsed: 'SAGE-FRED-T5-95M-INT8 + PresentationML Chunked Slide-Safe Engine',
     totalSegments: segments.length,
     modifiedSegments,
     totalIssuesFixed,
+    totalChunksProcessed: chunkCounter.count,
+    chunkMaxCharsUsed: Number(process.env.HARNESS_CHUNK_MAX_CHARS) || 480,
     segments,
     downloadBase64: outBuffer.toString('base64'),
     mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
