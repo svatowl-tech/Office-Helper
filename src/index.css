@@ -3,13 +3,22 @@
 
 @layer base {
   :root {
-    --font-sans: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --bg: #f2efeb;
+    --paper: #ffffff;
+    --ink: #1a1a1a;
+    --accent: #004ecc;
+    --accent-hover: #003da1;
+    --ink-faint: rgba(26, 26, 26, 0.08);
+    --font-display: 'Oswald', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'Space Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 
   body {
+    background-color: var(--bg);
+    color: var(--ink);
     font-family: var(--font-sans);
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
   }
 
   code, pre, .font-mono {
@@ -18,6 +27,20 @@
   }
 }
 
+.font-display {
+  font-family: var(--font-display);
+}
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+.archive-diagonal-accent {
+  background: linear-gradient(
+    45deg,
+    transparent 49.4%,
+    rgba(0, 78, 204, 0.14) 50%,
+    transparent 50.6%
+  );
+}
+

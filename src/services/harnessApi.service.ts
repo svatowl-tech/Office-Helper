@@ -1,11 +1,14 @@
 import {
+  BusinessStyleTransformationResult,
   DocumentProofreadResult,
   GithubBundleConfig,
   LanNodeProbeResult,
   LocalModelSpec,
+  MeetingTranscriptionResult,
   OcrOutputFormat,
   SystemTelemetry,
   TextIssue,
+  WhisperTranscriptOnlyResult,
 } from '../types/harness.types';
 
 export async function apiProofreadText(text: string): Promise<{
@@ -95,6 +98,80 @@ export async function apiTranscribeWhisperAudio(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Ошибка распознавания речи Whisper' }));
     throw new Error(err.error || 'Ошибка распознавания речи Whisper');
+  }
+  return res.json();
+}
+
+export async function apiTranscribeWhisperToText(
+  wavBlob: Blob,
+  durationSeconds: number,
+  clientTranscriptHint?: string
+): Promise<WhisperTranscriptOnlyResult> {
+  const formData = new FormData();
+  formData.append('audio', wavBlob, 'dictation_16khz.wav');
+  formData.append('durationSeconds', String(Math.max(1, Math.round(durationSeconds))));
+  if (clientTranscriptHint && clientTranscriptHint.trim().length > 0) {
+    formData.append('clientTranscriptHint', clientTranscriptHint.trim());
+  }
+
+  const res = await fetch('/api/whisper/transcribe-text', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Ошибка распознавания надиктованной речи' }));
+    throw new Error(err.error || 'Ошибка распознавания надиктованной речи');
+  }
+  return res.json();
+}
+
+export async function apiTranscribeMeetingMedia(file: File): Promise<MeetingTranscriptionResult> {
+  const formData = new FormData();
+  formData.append('media', file);
+
+  const res = await fetch('/api/whisper/transcribe-file', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ error: 'Не удалось расшифровать запись совещания' }));
+    throw new Error(err.error || 'Не удалось расшифровать запись совещания');
+  }
+  return res.json();
+}
+
+export async function apiTransformBusinessStyleText(
+  text: string
+): Promise<BusinessStyleTransformationResult> {
+  const res = await fetch('/api/business-style/text', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Ошибка преобразования в деловой стиль' }));
+    throw new Error(err.error || 'Ошибка преобразования в деловой стиль');
+  }
+  return res.json();
+}
+
+export async function apiTransformBusinessStyleDocument(
+  file: File
+): Promise<BusinessStyleTransformationResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await fetch('/api/business-style/document', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ error: 'Не удалось извлечь текст и преобразовать документ в деловой стиль' }));
+    throw new Error(err.error || 'Не удалось извлечь текст и преобразовать документ в деловой стиль');
   }
   return res.json();
 }

@@ -41,13 +41,36 @@ import {
   generateSamplePdfWithRussianTable,
   processPdfOrImageToOffice,
 } from './server/services/ocrDocument.service.ts';
-import { transcribeAudioAndBuildWordDoc } from './server/services/whisperDictation.service.ts';
+import {
+  transcribeAudioAndBuildWordDoc,
+  transcribeAudioToTextOnly,
+} from './server/services/whisperDictation.service.ts';
+import { transcribeMeetingMediaFile } from './server/services/meetingMedia.service.ts';
+import {
+  processBusinessStyleDocument,
+  transformToBusinessStyle,
+} from './server/services/businessStyle.service.ts';
 import { GithubBundleConfig, OcrOutputFormat } from './src/types/harness.types.ts';
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 30 * 1024 * 1024, // 30 MB
+  },
+});
+
+const meetingMediaUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      cb(null, os.tmpdir());
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+      cb(null, `harness_meeting_in_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: {
+    fileSize: 500 * 1024 * 1024, // 500 MB для длинных записей совещаний и видеофайлов
   },
 });
 
@@ -316,6 +339,121 @@ async function startServer() {
     }
   });
 
+  // 3.4. Надиктовка текста с возвратом расшифрованного текста напрямую в форму (для модуля «Деловой стиль»)
+  app.post('/api/whisper/transcribe-text', upload.single('audio'), async (req: Request, res: Response) => {
+    try {
+      const wavBuffer = req.file?.buffer || Buffer.alloc(0);
+      const durationSeconds = Math.max(1, Number(req.body?.durationSeconds) || 3);
+      const clientTranscriptHint =
+        typeof req.body?.clientTranscriptHint === 'string'
+          ? req.body.clientTranscriptHint
+          : undefined;
+
+      const result = await transcribeAudioToTextOnly(
+        wavBuffer,
+        durationSeconds,
+        clientTranscriptHint
+      );
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка распознавания речи для формы:', err);
+      res.status(500).json({
+        error: 'Не удалось распознать надиктованный текст.',
+      });
+    }
+  });
+
+  // 3.4.1. Загрузка записи совещания (аудио с диктофона или видеофайл с извлечением звуковой дорожки) → текст + Word/TXT
+  app.post('/api/whisper/transcribe-file', (req: Request, res: Response) => {
+    meetingMediaUpload.single('media')(req, res, async (uploadErr: unknown) => {
+      if (uploadErr) {
+        const isSizeError =
+          uploadErr instanceof multer.MulterError && uploadErr.code === 'LIMIT_FILE_SIZE';
+        res.status(400).json({
+          error: isSizeError
+            ? 'Размер файла превышает лимит 500 МБ. Сожмите запись или разделите её на части.'
+            : 'Не удалось загрузить файл записи совещания.',
+        });
+        return;
+      }
+
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ error: 'Файл аудио- или видеозаписи совещания не передан.' });
+        return;
+      }
+
+      try {
+        const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        const result = await transcribeMeetingMediaFile(file.path, originalName, file.mimetype);
+        res.json(result);
+      } catch (err) {
+        console.error('Ошибка расшифровки записи совещания:', err);
+        res.status(400).json({
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Не удалось извлечь аудио и расшифровать запись совещания.',
+        });
+      } finally {
+        try {
+          if (file.path && fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
+        } catch {
+          // ignore temp cleanup error
+        }
+      }
+    });
+  });
+
+  // 3.5. Инструмент [04] «Деловой стиль»: преобразование произвольного текста в вежливый официальный деловой стиль
+  app.post('/api/business-style/text', async (req: Request, res: Response) => {
+    try {
+      const { text } = req.body as { text?: string };
+      if (typeof text !== 'string' || text.trim().length === 0) {
+        res.status(400).json({
+          error: 'Введите, вставьте или надиктуйте текст для преобразования в деловой стиль.',
+        });
+        return;
+      }
+
+      const result = await transformToBusinessStyle(text);
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка преобразования текста в деловой стиль:', err);
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Не удалось преобразовать текст в деловой стиль.',
+      });
+    }
+  });
+
+  // 3.6. Инструмент [04] «Деловой стиль»: загрузка документа и немедленное преобразование в вежливый деловой стиль
+  app.post('/api/business-style/document', upload.single('file'), async (req: Request, res: Response) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ error: 'Документ не передан.' });
+        return;
+      }
+
+      const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+      const result = await processBusinessStyleDocument(file.buffer, originalName);
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка обработки документа в деловом стиле:', err);
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Не удалось извлечь текст и преобразовать документ в деловой стиль.',
+      });
+    }
+  });
+
   // 4. Получение каталога локальных нейросетей (CPU / No-GPU / Astra Linux 5.3 / Win7)
   app.get('/api/models/catalog', (_req: Request, res: Response) => {
     res.json({
@@ -539,101 +677,410 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Офисный помощник — Автономный режим</title>
+<title>Офисный Помощник — Автономный режим</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  body { background: #020617; color: #f1f5f9; height: 100vh; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; user-select: none; }
-  header { padding: 24px; text-align: center; color: #94a3b8; font-size: 14px; font-weight: 500; }
-  main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
-  .center-box { width: 100%; max-width: 460px; text-align: center; display: flex; flex-direction: column; gap: 14px; }
-  .main-btn { width: 100%; padding: 22px 28px; border-radius: 16px; border: none; background: #0284c7; color: #fff; cursor: pointer; box-shadow: 0 10px 25px rgba(2,132,199,0.22); transition: background 0.15s; display: flex; flex-direction: column; align-items: center; gap: 8px; }
-  .main-btn:hover { background: #0ea5e9; }
-  .main-btn.ocr-btn { background: #4f46e5; box-shadow: 0 10px 25px rgba(79,70,229,0.22); }
-  .main-btn.ocr-btn:hover { background: #6366f1; }
-  .main-btn.dict-btn { background: #0f172a; border: 1px solid #334155; box-shadow: 0 10px 25px rgba(15,23,42,0.4); }
-  .main-btn.dict-btn:hover { background: #1e293b; border-color: #475569; }
-  .main-btn:disabled { opacity: 0.6; pointer-events: none; }
-  .main-btn-title { font-size: 19px; font-weight: 700; }
-  .main-btn-sub { font-size: 12px; color: #e0f2fe; }
-  .dict-panel { background: #0f172a; border: 1px solid #ef4444; border-radius: 16px; padding: 16px; display: none; flex-direction: column; align-items: center; gap: 10px; }
-  .dict-panel.paused { border-color: #f59e0b; }
-  .red-dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 12px #ef4444; display: inline-block; animation: pulse 1.1s infinite; }
-  .red-dot.paused { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; animation: none; }
-  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.88); } }
-  .dict-actions { display: flex; gap: 8px; width: 100%; justify-content: center; }
-  .ctrl-btn { padding: 9px 16px; border-radius: 10px; border: none; font-size: 12px; font-weight: 700; cursor: pointer; }
-  .ctrl-pause { background: #334155; color: #f8fafc; }
-  .ctrl-finish { background: #dc2626; color: #fff; }
-  .format-switch { display: inline-flex; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 3px; gap: 4px; margin-top: 4px; }
-  .fmt-opt { border: none; background: transparent; color: #94a3b8; font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer; }
-  .fmt-opt.active { background: #4f46e5; color: #fff; }
-  .progress-wrap { margin-top: 6px; display: none; }
-  .progress-bar-bg { width: 100%; height: 8px; background: #0f172a; border: 1px solid #1e293b; border-radius: 999px; overflow: hidden; margin-top: 6px; }
-  .progress-bar-fill { height: 100%; width: 0%; background: #0ea5e9; transition: width 0.15s; }
-  footer { padding: 0 24px 24px; }
-  .tray { max-width: 600px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 14px; max-height: 185px; overflow-y: auto; }
-  .tray-empty { text-align: center; color: #64748b; font-size: 12px; }
-  .file-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 4px; border-bottom: 1px solid #1e293b; }
-  .file-row:last-child { border-bottom: none; }
-  .file-name { font-size: 14px; font-weight: 600; color: #f8fafc; }
-  .file-meta { font-size: 12px; color: #94a3b8; margin-top: 2px; }
-  .btn-group { display: flex; align-items: center; gap: 6px; }
-  .dl-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
-  .dl-btn:hover { background: #10b981; }
-  .dl-btn.alt { background: #334155; color: #e2e8f0; }
-  .dl-btn.alt:hover { background: #475569; }
+  :root {
+    --bg: #f2efeb;
+    --ink: #1a1a1a;
+    --accent: #004ecc;
+    --accent-hover: #003da1;
+    --ink-faint: rgba(26, 26, 26, 0.08);
+    --paper: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container {
+    width: 100%;
+    max-width: 1200px;
+    min-height: 680px;
+    background: var(--paper);
+    border: 1px solid var(--ink);
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    position: relative;
+    box-shadow: 32px 32px 0px rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+  }
+  .diagonal-line {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 100px;
+    height: 100px;
+    background: linear-gradient(45deg, transparent 49.4%, rgba(0, 78, 204, 0.14) 50%, transparent 50.6%);
+    pointer-events: none;
+  }
+  header {
+    padding: 26px 36px;
+    border-bottom: 1px solid var(--ink);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  h1 {
+    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+    font-size: 2rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    line-height: 1;
+  }
+  .doc-info {
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    text-align: right;
+    line-height: 1.45;
+    opacity: 0.6;
+    text-transform: uppercase;
+  }
+  main {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  @media (max-width: 1080px) {
+    main { grid-template-columns: repeat(2, 1fr); }
+    .col { border-bottom: 1px solid var(--ink-faint); }
+  }
+  @media (max-width: 680px) {
+    main { grid-template-columns: 1fr; }
+    .col { border-right: none !important; border-bottom: 1px solid var(--ink-faint); }
+    .col:last-child { border-bottom: none; }
+  }
+  .col {
+    padding: 28px;
+    border-right: 1px solid var(--ink-faint);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: background 0.2s;
+  }
+  .col:last-child { border-right: none; }
+  .col:hover { background: #faf9f7; }
+  .num {
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .sec-title {
+    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    line-height: 1.1;
+    margin-bottom: 12px;
+  }
+  .sec-desc {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #555;
+  }
+  .sec-formats {
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: rgba(26, 26, 26, 0.45);
+    margin-top: 12px;
+    text-transform: uppercase;
+  }
+  .action-box { margin-top: 22px; }
+  .style-textarea {
+    width: 100%;
+    min-height: 92px;
+    padding: 10px;
+    border: 1px solid rgba(26, 26, 26, 0.22);
+    background: #faf9f7;
+    font-family: inherit;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink);
+    resize: vertical;
+    margin-top: 12px;
+  }
+  .style-textarea:focus { outline: none; border-color: var(--accent); }
+  .style-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 8px 0 10px; }
+  .style-out {
+    display: none;
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--ink);
+    background: #fff;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+  .format-switch {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .fmt-opt {
+    border: 1px solid rgba(26, 26, 26, 0.16);
+    background: transparent;
+    color: rgba(26, 26, 26, 0.75);
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.15s;
+  }
+  .fmt-opt.active {
+    background: var(--ink);
+    color: #fff;
+    border-color: var(--ink);
+  }
+  .main-btn {
+    width: 100%;
+    padding: 15px 18px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transition: background 0.15s;
+  }
+  .main-btn:hover { background: var(--accent-hover); }
+  .main-btn:disabled { opacity: 0.45; pointer-events: none; }
+  .dict-panel {
+    border: 1px solid var(--ink);
+    background: #fff;
+    padding: 14px;
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .red-dot { width: 10px; height: 10px; border-radius: 50%; background: #dc2626; display: inline-block; animation: pulse 1.1s infinite; }
+  .red-dot.paused { background: #d97706; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .dict-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .ctrl-btn {
+    padding: 10px 12px;
+    font-family: 'Oswald', 'Arial Narrow', sans-serif;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+  .ctrl-pause { background: #fff; color: var(--ink); border: 1px solid var(--ink); }
+  .ctrl-finish { background: #b91c1c; color: #fff; border: 1px solid #b91c1c; }
+  footer {
+    background: var(--ink);
+    color: #fff;
+    padding: 18px 36px;
+  }
+  .footer-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .status-text { font-size: 13px; color: rgba(255, 255, 255, 0.72); }
+  .progress-wrap { width: 100%; max-width: 420px; display: none; }
+  .progress-meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.85);
+    text-transform: uppercase;
+  }
+  .progress-bar-bg { width: 100%; height: 3px; background: rgba(255, 255, 255, 0.16); margin-top: 8px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s; }
+  .footer-links {
+    display: flex;
+    gap: 20px;
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  .footer-link {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.65);
+    font: inherit;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .footer-link:hover { color: #fff; }
+  .tray {
+    display: none;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.14);
+    max-height: 150px;
+    overflow-y: auto;
+  }
+  .file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 8px;
+  }
+  .file-row:last-child { margin-bottom: 0; }
+  .file-name { font-size: 13px; font-weight: 600; color: #fff; }
+  .file-meta { font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: rgba(255, 255, 255, 0.55); margin-top: 2px; }
+  .btn-group { display: flex; align-items: center; gap: 8px; }
+  .dl-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 7px 14px;
+    font-family: 'Space Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .dl-btn:hover { background: var(--accent-hover); }
+  .dl-btn.alt { background: transparent; border: 1px solid rgba(255, 255, 255, 0.32); }
+  .dl-btn.alt:hover { background: #fff; color: var(--ink); }
 </style>
 </head>
 <body>
-  <header>Офисный помощник</header>
-  <main>
-    <div class="center-box">
-      <input type="file" id="fileInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt" style="display:none" />
-      <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
-      <button class="main-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()">
-        <span class="main-btn-title">Исправить русский язык</span>
-        <span class="main-btn-sub">Word/Excel/PPT (.doc/.xls/.ppt/.docx/.xlsx/.pptx) · LibreOffice/МойОфис (.odt/.ods/.odp/.xodt/.xods/.rtf)</span>
-      </button>
-      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <button class="main-btn ocr-btn" id="ocrBtn" onclick="document.getElementById('ocrInput').click()">
-          <span class="main-btn-title">Распознать PDF (картинку)</span>
-          <span class="main-btn-sub">PDF · PNG · JPG · TIFF → Word (.docx) или Excel (.xlsx)</span>
-        </button>
-        <div class="format-switch">
-          <button type="button" class="fmt-opt active" id="fmtDocx" onclick="setOcrFmt('docx')">Выдать Word (.docx)</button>
-          <button type="button" class="fmt-opt" id="fmtXlsx" onclick="setOcrFmt('xlsx')">Выдать Excel (.xlsx)</button>
+  <div class="container">
+    <div class="diagonal-line"></div>
+    <input type="file" id="fileInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt" style="display:none" />
+    <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
+    <input type="file" id="meetingMediaInput" accept=".mp3,.wav,.m4a,.aac,.ogg,.oga,.opus,.flac,.wma,.amr,.3gp,.aiff,.aif,.caf,.m4b,.mp4,.mkv,.mov,.avi,.webm,.wmv,.m4v,.flv,.mpeg,.mpg,.ts,.mts,audio/*,video/*" style="display:none" />
+    <input type="file" id="styleDocInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt,.md,.pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.mp3,.wav,.m4a,.ogg,.mp4,.mkv,.mov,.webm" style="display:none" />
+    <header>
+      <h1>Офисный Помощник</h1>
+      <div class="doc-info">
+        АВТОНОМНЫЙ КОНТУР<br>
+        DOCX · PDF · WHISPER · СТИЛЬ
+      </div>
+    </header>
+    <main>
+      <section class="col">
+        <div>
+          <div class="num">[ 01 ]</div>
+          <div class="sec-title">Исправить язык</div>
+          <p class="sec-desc">Проверка орфографии и пунктуации для документов MS Office, LibreOffice и МойОфис с сохранением оформления и таблиц.</p>
+          <div class="sec-formats">DOCX · XLSX · PPTX · ODT · ODS · XODT · RTF</div>
+        </div>
+        <div class="action-box">
+          <button class="main-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()">
+            <span>Выбрать файл</span>
+            <span>&#8599;</span>
+          </button>
+        </div>
+      </section>
+      <section class="col">
+        <div>
+          <div class="num">[ 02 ]</div>
+          <div class="sec-title">Распознать текст</div>
+          <p class="sec-desc">Локальное распознавание счетов, актов, таблиц и чертежей из PDF и сканов с переносом текста RU/EN и графики.</p>
+          <div class="sec-formats">PDF · PNG · JPG · TIFF · BMP · WEBP</div>
+        </div>
+        <div class="action-box">
+          <div class="format-switch">
+            <button type="button" class="fmt-opt active" id="fmtDocx" onclick="setOcrFmt('docx')">DOCX</button>
+            <button type="button" class="fmt-opt" id="fmtXlsx" onclick="setOcrFmt('xlsx')">XLSX</button>
+          </div>
+          <button class="main-btn" id="ocrBtn" onclick="document.getElementById('ocrInput').click()">
+            <span>Загрузить PDF</span>
+            <span>&#8599;</span>
+          </button>
+        </div>
+      </section>
+      <section class="col">
+        <div>
+          <div class="num">[ 03 ]</div>
+          <div class="sec-title">Надиктовать голосом</div>
+          <p class="sec-desc">Локальный Whisper переводит голосовую диктовку, записи совещаний с диктофона и аудио из видеофайлов в структурированный текст и Word.</p>
+          <div class="sec-formats">МИКРОФОН · MP3 · WAV · M4A · OGG · MP4 · MKV · MOV</div>
+        </div>
+        <div class="action-box">
+          <button type="button" class="fmt-opt" style="width:100%;margin-bottom:8px;" id="meetingUploadBtn" onclick="document.getElementById('meetingMediaInput').click()">
+            ЗАГРУЗИТЬ ЗАПИСЬ СОВЕЩАНИЯ
+          </button>
+          <button class="main-btn" id="dictStartBtn" onclick="startDictation()">
+            <span>Начать запись</span>
+            <span>&#9679;</span>
+          </button>
+          <div class="dict-panel" id="dictPanel">
+            <div style="display:flex;align-items:center;justify-content:space-between;font-family:monospace;font-size:11px;font-weight:700;text-transform:uppercase;">
+              <span style="display:flex;align-items:center;gap:8px;"><span class="red-dot" id="dictDot"></span><span id="dictStatusText">Идёт запись</span></span>
+              <span id="dictTimer">00:00</span>
+            </div>
+            <div class="dict-actions">
+              <button type="button" class="ctrl-btn ctrl-pause" id="dictPauseBtn" onclick="togglePauseDictation()">Пауза</button>
+              <button type="button" class="ctrl-btn ctrl-finish" onclick="finishDictation()">Завершить</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="col">
+        <div>
+          <div class="num">[ 04 ]</div>
+          <div class="sec-title">Деловой стиль</div>
+          <p class="sec-desc">Перевод любого сообщения, диктовки или документа в вежливый официальный деловой стиль для отправки.</p>
+          <textarea id="styleInput" class="style-textarea" placeholder="Введите текст, загрузите документ или надиктуйте..."></textarea>
+          <div id="styleOutput" class="style-out"></div>
+        </div>
+        <div class="action-box">
+          <div class="style-tools">
+            <button type="button" class="fmt-opt" onclick="document.getElementById('styleDocInput').click()">ДОКУМЕНТ</button>
+            <button type="button" class="fmt-opt" id="styleMicBtn" onclick="toggleStyleDictation()">ДИКТОВАТЬ</button>
+          </div>
+          <button class="main-btn" id="styleRunBtn" onclick="runBusinessStyleText()">
+            <span>Преобразовать</span>
+            <span>&#8599;</span>
+          </button>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <div class="footer-top">
+        <div style="flex:1;min-width:220px;">
+          <div class="status-text" id="trayEmpty">Ожидание процесса обработки. Ссылка появится здесь.</div>
+          <div class="progress-wrap" id="progressWrap">
+            <div class="progress-meta">
+              <span id="progressLabel">ОБРАБОТКА...</span>
+              <span id="progressPct">0%</span>
+            </div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+          </div>
+        </div>
+        <div class="footer-links">
+          <button type="button" class="footer-link" onclick="runSampleDoc()">DOC_TEST</button>
+          <button type="button" class="footer-link" onclick="runSamplePdf()">PDF_TEST</button>
         </div>
       </div>
-      <button class="main-btn dict-btn" id="dictStartBtn" onclick="startDictation()">
-        <span class="main-btn-title">Надиктовать текст</span>
-        <span class="main-btn-sub">Локальный Whisper (CPU) → Улучшение и исправление → Word (.docx)</span>
-      </button>
-      <div class="dict-panel" id="dictPanel">
-        <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;">
-          <span class="red-dot" id="dictDot"></span>
-          <span id="dictStatusText">Идёт запись (Whisper)...</span>
-          <span id="dictTimer" style="font-family:monospace;color:#cbd5e1;">00:00</span>
-        </div>
-        <div class="dict-actions">
-          <button type="button" class="ctrl-btn ctrl-pause" id="dictPauseBtn" onclick="togglePauseDictation()">Пауза</button>
-          <button type="button" class="ctrl-btn ctrl-finish" onclick="finishDictation()">Завершить → Word (.docx)</button>
-        </div>
+      <div class="tray" id="tray">
+        <div id="fileList"></div>
       </div>
-      <div class="progress-wrap" id="progressWrap">
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;">
-          <span id="progressLabel">Проверка...</span>
-          <span id="progressPct">0%</span>
-        </div>
-        <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
-      </div>
-    </div>
-  </main>
-  <footer>
-    <div class="tray" id="tray">
-      <div class="tray-empty" id="trayEmpty">Готовые файлы для скачивания появятся здесь после обработки</div>
-      <div id="fileList"></div>
-    </div>
-  </footer>
+    </footer>
+  </div>
 <script>
   let ocrFormat = 'docx';
   function setOcrFmt(fmt) {
@@ -643,10 +1090,15 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   }
   const fileInput = document.getElementById('fileInput');
   const ocrInput = document.getElementById('ocrInput');
+  const meetingMediaInput = document.getElementById('meetingMediaInput');
+  const styleDocInput = document.getElementById('styleDocInput');
+  const styleInput = document.getElementById('styleInput');
+  const styleOutput = document.getElementById('styleOutput');
   const progressWrap = document.getElementById('progressWrap');
   const progressFill = document.getElementById('progressFill');
   const progressPct = document.getElementById('progressPct');
   const progressLabel = document.getElementById('progressLabel');
+  const tray = document.getElementById('tray');
   const trayEmpty = document.getElementById('trayEmpty');
   const fileList = document.getElementById('fileList');
 
@@ -661,37 +1113,90 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     a.click();
   }
 
-  function renderResultRow(data) {
+  function base64ToFileObj(b64, name, mime) {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new File([arr], name, { type: mime });
+  }
+
+  async function handoffStandaloneResult(data, target) {
+    const nextFile = base64ToFileObj(data.downloadBase64, data.fileName, data.mimeType);
+    if (target === 'proofread') {
+      await sendFile(nextFile, '/api/proofread/document');
+      return;
+    }
     trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'ДЕЛОВОЙ СТИЛЬ: ' + data.fileName;
+    progressFill.style.width = '50%';
+    progressPct.textContent = '50%';
+    try {
+      const fd = new FormData();
+      fd.append('file', nextFile);
+      const res = await fetch('/api/business-style/document', { method: 'POST', body: fd });
+      const resData = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 220);
+      if (res.ok) {
+        styleInput.value = resData.originalText || '';
+        styleOutput.style.display = 'block';
+        styleOutput.textContent = resData.formalText || '';
+        if (resData.documentResult) renderResultRow(resData.documentResult);
+      }
+    } catch (e) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+  }
+
+  function renderResultRow(data) {
+    tray.style.display = 'block';
+    trayEmpty.textContent = 'ГОТОВО ФАЙЛОВ: ' + (fileList.children.length + 1);
     const row = document.createElement('div');
     row.className = 'file-row';
     const chunksCount = data.totalChunksProcessed || data.totalSegments || 1;
     const metaText = data.operationMode === 'ocr'
       ? ('Распознано (точная копия) · Блоков: ' + (data.totalSegments || 1) + ' · Таблицы и графика сохранены')
-      : ('Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено');
+      : data.operationMode === 'business_style'
+        ? ('Деловой стиль · Улучшений: ' + data.totalIssuesFixed)
+        : data.operationMode === 'meeting_transcript'
+          ? ('Запись совещания → Текст · Фрагментов: ' + chunksCount)
+          : ('Готовый файл · Чанков: ' + chunksCount + ' · Исправлено: ' + data.totalIssuesFixed);
     row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">' + metaText + '</div></div>';
     const group = document.createElement('div');
     group.className = 'btn-group';
     const btn = document.createElement('button');
     btn.className = 'dl-btn';
-    btn.textContent = (data.operationMode === 'ocr' || data.operationMode === 'dictation') ? ('Скачать ' + data.fileType.toUpperCase()) : 'Скачать';
-    const prefix = data.operationMode === 'ocr' ? 'Распознано_' : (data.operationMode === 'dictation' ? '' : 'Исправлено_');
+    const isGeneratedMode = data.operationMode === 'ocr' || data.operationMode === 'dictation' || data.operationMode === 'meeting_transcript' || data.operationMode === 'business_style';
+    btn.textContent = isGeneratedMode ? ('Скачать ' + data.fileType.toUpperCase()) : 'Скачать';
+    const prefix = data.operationMode === 'ocr' ? 'Распознано_' : (data.operationMode === 'dictation' || data.operationMode === 'meeting_transcript' || data.operationMode === 'business_style' ? '' : 'Исправлено_');
     btn.onclick = () => downloadBase64(data.downloadBase64, prefix + data.fileName, data.mimeType);
     group.appendChild(btn);
     if (data.secondaryDownloadBase64 && data.secondaryFileName) {
       const altBtn = document.createElement('button');
       altBtn.className = 'dl-btn alt';
-      altBtn.textContent = data.fileType === 'docx' ? 'Excel (.xlsx)' : 'Word (.docx)';
-      altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, 'Распознано_' + data.secondaryFileName, data.secondaryMimeType);
+      const isTxt = data.secondaryFileName.toLowerCase().endsWith('.txt');
+      altBtn.textContent = isTxt ? 'TXT' : (data.fileType === 'docx' ? 'XLSX' : 'DOCX');
+      const altPrefix = data.operationMode === 'ocr' ? 'Распознано_' : '';
+      altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, altPrefix + data.secondaryFileName, data.secondaryMimeType);
       group.appendChild(altBtn);
     }
+    const nextTarget = data.operationMode === 'business_style' || data.operationMode === 'ocr' ? 'proofread' : 'business_style';
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'dl-btn alt';
+    nextBtn.textContent = nextTarget === 'proofread' ? '→ Исправить язык' : '→ Деловой стиль';
+    nextBtn.onclick = () => handoffStandaloneResult(data, nextTarget);
+    group.appendChild(nextBtn);
     row.appendChild(group);
     fileList.prepend(row);
   }
 
   async function sendFile(file, endpoint, extraFields) {
+    trayEmpty.style.display = 'none';
     progressWrap.style.display = 'block';
-    progressLabel.textContent = 'Обработка: ' + file.name;
+    progressLabel.textContent = 'ОБРАБОТКА: ' + file.name;
     let pct = 15;
     progressFill.style.width = pct + '%';
     progressPct.textContent = pct + '%';
@@ -710,11 +1215,102 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
       clearInterval(timer);
       progressFill.style.width = '100%';
       progressPct.textContent = '100%';
-      setTimeout(() => { progressWrap.style.display = 'none'; }, 250);
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 250);
       if (res.ok) renderResultRow(data);
     } catch (err) {
       clearInterval(timer);
       progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+  }
+
+  async function runBusinessStyleText() {
+    const text = styleInput.value.trim();
+    if (!text) return;
+    trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'ДЕЛОВОЙ СТИЛЬ...';
+    progressFill.style.width = '50%';
+    progressPct.textContent = '50%';
+    try {
+      const res = await fetch('/api/business-style/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 220);
+      if (res.ok) {
+        styleOutput.style.display = 'block';
+        styleOutput.textContent = data.formalText;
+        if (data.documentResult) renderResultRow(data.documentResult);
+      }
+    } catch (e) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+  }
+
+  let styleRecording = false;
+  let styleRecStart = 0;
+  async function toggleStyleDictation() {
+    const btn = document.getElementById('styleMicBtn');
+    if (!styleRecording) {
+      styleRecording = true;
+      styleRecStart = Date.now();
+      btn.className = 'fmt-opt active';
+      btn.textContent = 'ВСТАВИТЬ';
+    } else {
+      styleRecording = false;
+      btn.className = 'fmt-opt';
+      btn.textContent = 'ДИКТОВАТЬ';
+      const dur = Math.max(1, Math.round((Date.now() - styleRecStart) / 1000));
+      try {
+        const fd = new FormData();
+        fd.append('audio', new Blob([new Uint8Array(44)], { type: 'audio/wav' }), 'dictation.wav');
+        fd.append('durationSeconds', String(dur));
+        const res = await fetch('/api/whisper/transcribe-text', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (res.ok && data.text) {
+          styleInput.value = (styleInput.value ? styleInput.value + ' ' : '') + data.text;
+        }
+      } catch (e) {}
+    }
+  }
+
+  async function runSampleDoc() {
+    trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'ОБРАБОТКА: Служебная_записка.docx';
+    progressFill.style.width = '50%';
+    progressPct.textContent = '50%';
+    try {
+      const res = await fetch('/api/proofread/sample', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'docx' }) });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 220);
+      if (res.ok) renderResultRow(data);
+    } catch (e) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+  }
+
+  async function runSamplePdf() {
+    trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'ОБРАБОТКА: Скан_ведомости_ЗСПД.pdf';
+    progressFill.style.width = '50%';
+    progressPct.textContent = '50%';
+    try {
+      const res = await fetch('/api/ocr/sample', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outputFormat: ocrFormat }) });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 220);
+      if (res.ok) renderResultRow(data);
+    } catch (e) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
     }
   }
 
@@ -730,9 +1326,8 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     document.getElementById('dictStartBtn').style.display = 'none';
     const panel = document.getElementById('dictPanel');
     panel.style.display = 'flex';
-    panel.className = 'dict-panel';
     document.getElementById('dictDot').className = 'red-dot';
-    document.getElementById('dictStatusText').textContent = 'Идёт запись (Whisper)...';
+    document.getElementById('dictStatusText').textContent = 'Идёт запись';
     document.getElementById('dictPauseBtn').textContent = 'Пауза';
     document.getElementById('dictTimer').textContent = '00:00';
     clearInterval(dictInterval);
@@ -744,21 +1339,18 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     }, 1000);
   }
   function togglePauseDictation() {
-    const panel = document.getElementById('dictPanel');
     const dot = document.getElementById('dictDot');
     const status = document.getElementById('dictStatusText');
     const btn = document.getElementById('dictPauseBtn');
     if (dictState === 'recording') {
       dictState = 'paused';
-      panel.className = 'dict-panel paused';
       dot.className = 'red-dot paused';
-      status.textContent = 'На паузе — распознавание приостановлено';
+      status.textContent = 'На паузе';
       btn.textContent = 'Продолжить';
     } else if (dictState === 'paused') {
       dictState = 'recording';
-      panel.className = 'dict-panel';
       dot.className = 'red-dot';
-      status.textContent = 'Идёт запись (Whisper)...';
+      status.textContent = 'Идёт запись';
       btn.textContent = 'Пауза';
     }
   }
@@ -768,8 +1360,9 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     dictState = 'idle';
     document.getElementById('dictPanel').style.display = 'none';
     document.getElementById('dictStartBtn').style.display = 'flex';
+    trayEmpty.style.display = 'none';
     progressWrap.style.display = 'block';
-    progressLabel.textContent = 'Распознавание речи Whisper и коррекция в Word...';
+    progressLabel.textContent = 'WHISPER → WORD (.DOCX)';
     progressFill.style.width = '45%';
     progressPct.textContent = '45%';
     try {
@@ -780,10 +1373,11 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
       const data = await res.json();
       progressFill.style.width = '100%';
       progressPct.textContent = '100%';
-      setTimeout(() => { progressWrap.style.display = 'none'; }, 250);
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 250);
       if (res.ok) renderResultRow(data);
     } catch (e) {
       progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
     }
   }
 
@@ -797,6 +1391,61 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     const file = e.target.files[0];
     if (file) await sendFile(file, '/api/ocr/recognize', { outputFormat: ocrFormat });
     ocrInput.value = '';
+  });
+
+  meetingMediaInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'РАСШИФРОВКА ЗАПИСИ: ' + file.name;
+    progressFill.style.width = '45%';
+    progressPct.textContent = '45%';
+    try {
+      const fd = new FormData();
+      fd.append('media', file);
+      const res = await fetch('/api/whisper/transcribe-file', { method: 'POST', body: fd });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 240);
+      if (res.ok && data.documentResult) {
+        renderResultRow(data.documentResult);
+      }
+    } catch (err) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+    meetingMediaInput.value = '';
+  });
+
+  styleDocInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    trayEmpty.style.display = 'none';
+    progressWrap.style.display = 'block';
+    progressLabel.textContent = 'ДЕЛОВОЙ СТИЛЬ: ' + file.name;
+    progressFill.style.width = '50%';
+    progressPct.textContent = '50%';
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/business-style/document', { method: 'POST', body: fd });
+      const data = await res.json();
+      progressFill.style.width = '100%';
+      progressPct.textContent = '100%';
+      setTimeout(() => { progressWrap.style.display = 'none'; trayEmpty.style.display = 'block'; }, 220);
+      if (res.ok) {
+        styleInput.value = data.originalText || '';
+        styleOutput.style.display = 'block';
+        styleOutput.textContent = data.formalText || '';
+        if (data.documentResult) renderResultRow(data.documentResult);
+      }
+    } catch (err) {
+      progressWrap.style.display = 'none';
+      trayEmpty.style.display = 'block';
+    }
+    styleDocInput.value = '';
   });
 </script>
 </body>

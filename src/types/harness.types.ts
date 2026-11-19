@@ -47,6 +47,13 @@ export interface TextChunkSpan {
 
 export type OcrOutputFormat = 'docx' | 'xlsx';
 
+export type ToolStageId =
+  | 'proofread'
+  | 'ocr'
+  | 'dictation'
+  | 'meeting_transcript'
+  | 'business_style';
+
 export interface DocumentProofreadResult {
   fileName: string;
   fileType:
@@ -74,11 +81,48 @@ export interface DocumentProofreadResult {
   segments: DocumentSegment[];
   downloadBase64: string;
   mimeType: string;
-  operationMode?: 'proofread' | 'ocr' | 'dictation';
+  operationMode?: ToolStageId;
+  pipelineTrail?: ToolStageId[];
   sourceFileName?: string;
   secondaryFileName?: string;
   secondaryDownloadBase64?: string;
   secondaryMimeType?: string;
+}
+
+export interface BusinessStyleTransformationResult {
+  originalText: string;
+  formalText: string;
+  improvementsCount: number;
+  appliedTransformations: string[];
+  processingTimeMs: number;
+  engineUsed: string;
+  sourceFileName?: string;
+  documentResult: DocumentProofreadResult;
+}
+
+export interface WhisperTranscriptOnlyResult {
+  text: string;
+  rawText: string;
+  durationSeconds: number;
+  processingTimeMs: number;
+  engineUsed: string;
+}
+
+export type MeetingMediaKind = 'audio' | 'video';
+
+export interface MeetingTranscriptionResult {
+  sourceFileName: string;
+  mediaKind: MeetingMediaKind;
+  mediaExtension: string;
+  audioCodec?: string;
+  durationSeconds: number;
+  extractedAudioBytes: number;
+  transcriptText: string;
+  rawTranscriptText: string;
+  chunksProcessed: number;
+  processingTimeMs: number;
+  engineUsed: string;
+  documentResult: DocumentProofreadResult;
 }
 
 export interface LocalModelSpec {
