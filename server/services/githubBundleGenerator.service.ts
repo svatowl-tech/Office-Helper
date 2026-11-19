@@ -133,6 +133,7 @@ jobs:
             cmake --build /tmp/build-whisper-avx2 --target whisper-cli -j$(nproc) && \\
             cp /tmp/build-whisper-avx2/bin/whisper-cli /out/bin/linux-x64-avx2/whisper-cli
           '
+          sudo chown -R "\$(id -u):\$(id -g)" /tmp/llama-cpp /tmp/whisper-cpp dist-airgap
 
       - name: "5. Подключение нативных сборок llama-server.exe и whisper-cli.exe БЕЗ МОДИФИКАЦИЙ для Windows 8+ / 10 / 11"
         uses: actions/download-artifact@v4

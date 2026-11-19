@@ -118,6 +118,7 @@ jobs:
              gcc -O2 -static server/native-launcher.c -o /src/dist-airgap/Office-Assistant-AstraLinux.run && \
              chmod +x /src/dist-airgap/Office-Assistant-AstraLinux.run && \
              cp /src/dist-airgap/Office-Assistant-AstraLinux.run '/src/dist-airgap/Офисный-Помощник-AstraLinux.run'"
+          sudo chown -R "$(id -u):$(id -g)" dist-airgap
 
       - name: "5. Компиляция 100% статических llama-server и whisper-cli для Astra Linux 1.7.11 (musl static, Core i3-9100 AVX2 + универсальный SSE4.2)"
         run: |
@@ -186,6 +187,8 @@ jobs:
             cp /tmp/build-whisper-avx2/bin/whisper-cli /out/bin/linux-x64-avx2/whisper-cli && \
             chmod +x /out/bin/linux-x64-avx2/whisper-cli
           '
+          # Возвращаем права владельца после работы root внутри Alpine Docker (whisper.cpp CMakeLists.txt создает bindings/javascript/package.json внутри /tmp/whisper-cpp)
+          sudo chown -R "$(id -u):$(id -g)" /tmp/llama-cpp /tmp/whisper-cpp dist-airgap
 
       - name: "6. Подключение нативных сборок llama-server.exe и whisper-cli.exe БЕЗ МОДИФИКАЦИЙ (Windows 8+ / 10 / 11)"
         uses: actions/download-artifact@v4
