@@ -1,6 +1,12 @@
 import {
   BusinessStyleTransformationResult,
+  DocumentCitation,
+  DocumentHarnessAnswer,
   DocumentProofreadResult,
+  DocumentSourceSummary,
+  DocumentWorkspaceSnapshot,
+  ExtractedEntityItem,
+  ExtractedTableView,
   GithubBundleConfig,
   LanNodeProbeResult,
   LocalModelSpec,
@@ -172,6 +178,116 @@ export async function apiTransformBusinessStyleDocument(
       .json()
       .catch(() => ({ error: 'Не удалось извлечь текст и преобразовать документ в деловой стиль' }));
     throw new Error(err.error || 'Не удалось извлечь текст и преобразовать документ в деловой стиль');
+  }
+  return res.json();
+}
+
+export async function apiGetDocumentWorkSession(
+  sessionId: string
+): Promise<DocumentWorkspaceSnapshot> {
+  const res = await fetch(`/api/doc-work/session/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Не удалось загрузить сессию документов' }));
+    throw new Error(err.error || 'Не удалось загрузить сессию документов');
+  }
+  return res.json();
+}
+
+export async function apiUploadDocumentWorkFiles(
+  sessionId: string,
+  files: File[]
+): Promise<{ added: DocumentSourceSummary[]; snapshot: DocumentWorkspaceSnapshot }> {
+  const formData = new FormData();
+  formData.append('sessionId', sessionId);
+  for (const file of files) {
+    formData.append('files', file);
+  }
+
+  const res = await fetch('/api/doc-work/upload', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ error: 'Не удалось проиндексировать загруженные файлы' }));
+    throw new Error(err.error || 'Не удалось проиндексировать загруженные файлы');
+  }
+  return res.json();
+}
+
+export async function apiMountDocumentWorkDiskPath(
+  sessionId: string,
+  diskPath: string
+): Promise<{
+  resolvedPath: string;
+  indexedCount: number;
+  skippedCount: number;
+  snapshot: DocumentWorkspaceSnapshot;
+}> {
+  const res = await fetch('/api/doc-work/mount-disk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, diskPath }),
+  });
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ error: 'Не удалось подключить указанную папку или файл на диске' }));
+    throw new Error(err.error || 'Не удалось подключить указанную папку или файл на диске');
+  }
+  return res.json();
+}
+
+export async function apiRemoveDocumentWorkSource(
+  sessionId: string,
+  sourceId?: string
+): Promise<{ snapshot: DocumentWorkspaceSnapshot }> {
+  const res = await fetch('/api/doc-work/source', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, sourceId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Не удалось удалить документ из сессии' }));
+    throw new Error(err.error || 'Не удалось удалить документ из сессии');
+  }
+  return res.json();
+}
+
+export async function apiQueryDocumentWork(
+  sessionId: string,
+  query: string,
+  selectedSourceIds?: string[]
+): Promise<DocumentHarnessAnswer> {
+  const res = await fetch('/api/doc-work/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, query, selectedSourceIds }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Ошибка выполнения запроса по документам' }));
+    throw new Error(err.error || 'Ошибка выполнения запроса по документам');
+  }
+  return res.json();
+}
+
+export async function apiExportDocumentWorkOffice(params: {
+  format: 'docx' | 'xlsx';
+  title: string;
+  answerText: string;
+  citations: DocumentCitation[];
+  entities: ExtractedEntityItem[];
+  tables: ExtractedTableView[];
+}): Promise<DocumentProofreadResult> {
+  const res = await fetch('/api/doc-work/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Не удалось собрать файл Word / Excel' }));
+    throw new Error(err.error || 'Не удалось собрать файл Word / Excel');
   }
   return res.json();
 }

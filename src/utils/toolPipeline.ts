@@ -1,6 +1,6 @@
 import { DocumentProofreadResult, ToolStageId } from '../types/harness.types';
 
-export type HandoffTargetTool = 'proofread' | 'business_style';
+export type HandoffTargetTool = 'proofread' | 'business_style' | 'document_work';
 
 export interface ToolHandoffOption {
   target: HandoffTargetTool;
@@ -15,6 +15,7 @@ const STAGE_SHORT_NAMES: Record<ToolStageId, string> = {
   dictation: 'Диктовка',
   meeting_transcript: 'Совещание',
   business_style: 'Деловой стиль',
+  document_work: 'Работа с документом',
 };
 
 /**
@@ -62,6 +63,12 @@ export function getNextToolHandoffs(result: DocumentProofreadResult): ToolHandof
         shortLabel: 'Деловой стиль',
         hint: 'Перевести распознанный документ в вежливый официальный стиль',
       },
+      {
+        target: 'document_work',
+        badge: '[ 05 ]',
+        shortLabel: 'Работа с документом',
+        hint: 'Открыть распознанный файл в Харнесе для поиска, извлечения сумм, таблиц и сводки',
+      },
     ];
   }
 
@@ -79,6 +86,12 @@ export function getNextToolHandoffs(result: DocumentProofreadResult): ToolHandof
         shortLabel: 'Исправить язык',
         hint: 'Выполнить полную коррекцию документа Word (.docx)',
       },
+      {
+        target: 'document_work',
+        badge: '[ 05 ]',
+        shortLabel: 'Работа с документом',
+        hint: 'Передать стенограмму в Харнес для поиска решений, дат и сборки выписки',
+      },
     ];
   }
 
@@ -90,16 +103,45 @@ export function getNextToolHandoffs(result: DocumentProofreadResult): ToolHandof
         shortLabel: 'Деловой стиль',
         hint: 'Преобразовать исправленный документ в вежливый деловой стиль',
       },
+      {
+        target: 'document_work',
+        badge: '[ 05 ]',
+        shortLabel: 'Работа с документом',
+        hint: 'Открыть документ в Харнесе для поиска, оглавления и извлечения реквизитов',
+      },
     ];
   }
 
-  // business_style -> финальная проверка языка в [01]
+  if (mode === 'document_work') {
+    return [
+      {
+        target: 'proofread',
+        badge: '[ 01 ]',
+        shortLabel: 'Исправить язык',
+        hint: 'Проверить собранный файл Word/Excel в корректоре орфографии и пунктуации',
+      },
+      {
+        target: 'business_style',
+        badge: '[ 04 ]',
+        shortLabel: 'Деловой стиль',
+        hint: 'Оформить собранную выборку в вежливое официальное письмо',
+      },
+    ];
+  }
+
+  // business_style -> финальная проверка языка в [01] или анализ в [05]
   return [
     {
       target: 'proofread',
       badge: '[ 01 ]',
       shortLabel: 'Исправить язык',
       hint: 'Проверить итоговый документ Word в корректоре орфографии и пунктуации',
+    },
+    {
+      target: 'document_work',
+      badge: '[ 05 ]',
+      shortLabel: 'Работа с документом',
+      hint: 'Добавить письмо в сессию Харнеса для совместной работы с другими файлами',
     },
   ];
 }

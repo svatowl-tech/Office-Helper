@@ -4,6 +4,8 @@ import {
   ArrowUpRight,
   Download,
   FileUp,
+  FolderOpen,
+  ListChecks,
   Maximize2,
   Mic,
   Pause,
@@ -14,21 +16,28 @@ import {
 } from 'lucide-react';
 import {
   BusinessStyleTransformationResult,
+  DocumentHarnessAnswer,
   DocumentProofreadResult,
+  DocumentWorkspaceSnapshot,
   MeetingTranscriptionResult,
   OcrOutputFormat,
 } from './types/harness.types';
 import {
+  apiExportDocumentWorkOffice,
   apiLoadSampleDocument,
   apiLoadSampleOcrPdf,
+  apiMountDocumentWorkDiskPath,
   apiProofreadDocument,
   apiProofreadText,
+  apiQueryDocumentWork,
   apiRecognizePdfOrImage,
+  apiRemoveDocumentWorkSource,
   apiTranscribeMeetingMedia,
   apiTranscribeWhisperAudio,
   apiTranscribeWhisperToText,
   apiTransformBusinessStyleDocument,
   apiTransformBusinessStyleText,
+  apiUploadDocumentWorkFiles,
   triggerBase64Download,
 } from './services/harnessApi.service';
 import { WhisperWavRecorder } from './utils/wavRecorder';
@@ -42,9 +51,16 @@ import {
 } from './utils/toolPipeline';
 import { BusinessStyleWorkspace } from './components/BusinessStyleWorkspace';
 import { MeetingTranscriptWorkspace } from './components/MeetingTranscriptWorkspace';
+import { DocumentWorkWorkspace } from './components/DocumentWorkWorkspace';
+import { ProofreadSummaryWorkspace } from './components/ProofreadSummaryWorkspace';
 
 type DictationStatus = 'idle' | 'recording' | 'paused';
-type ActiveWorkspaceView = 'tools' | 'business_style' | 'meeting_transcript';
+type ActiveWorkspaceView =
+  | 'tools'
+  | 'business_style'
+  | 'meeting_transcript'
+  | 'document_work'
+  | 'proofread_summary';
 
 function formatElapsedTimer(totalSeconds: number): string {
   const mins = Math.floor(totalSeconds / 60);
@@ -57,6 +73,10 @@ export default function App() {
   const ocrInputRef = useRef<HTMLInputElement | null>(null);
   const meetingMediaInputRef = useRef<HTMLInputElement | null>(null);
   const styleDocInputRef = useRef<HTMLInputElement | null>(null);
+  const docWorkFileInputRef = useRef<HTMLInputElement | null>(null);
+  const docWorkSessionIdRef = useRef<string>(
+    `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  );
   const wavRecorderRef = useRef<WhisperWavRecorder | null>(null);
   const styleWavRecorderRef = useRef<WhisperWavRecorder | null>(null);
   const styleSpeechCapturerRef = useRef<LiveSpeechHintCapturer | null>(null);
@@ -71,7 +91,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [completedFiles, setCompletedFiles] = useState<DocumentProofreadResult[]>([]);
 
-  // Активный экран: главная сетка инструментов, расшифровка записи совещания или редактор делового стиля
+  // Активный экран: главная сетка 3+2 инструментов или рабочая зона одного из модулей
   const [activeWorkspace, setActiveWorkspace] = useState<ActiveWorkspaceView>('tools');
 
   // Состояние расшифрованной записи совещания ([ 03 ])
@@ -87,6 +107,22 @@ export default function App() {
   const [formalProofreadNote, setFormalProofreadNote] = useState<string | null>(null);
   const [styleDictationStatus, setStyleDictationStatus] = useState<DictationStatus>('idle');
   const [styleDictationElapsedSec, setStyleDictationElapsedSec] = useState<number>(0);
+
+  // Состояние пятого инструмента: [ 05 ] «Работа с документом» (Харнес)
+  const [docWorkSnapshot, setDocWorkSnapshot] = useState<DocumentWorkspaceSnapshot>(() => ({
+    sessionId: docWorkSessionIdRef.current,
+    sources: [],
+    diskMounts: [],
+    totalChunks: 0,
+    totalTables: 0,
+    totalPagesOrSheets: 0,
+  }));
+  const [docWorkAnswers, setDocWorkAnswers] = useState<DocumentHarnessAnswer[]>([]);
+  const [docWorkQuickInput, setDocWorkQuickInput] = useState<string>('');
+
+  // Состояние просмотра отдельной сводки исправлений ([ 01 ] Исправить язык)
+  const [selectedProofreadSummary, setSelectedProofreadSummary] =
+    useState<DocumentProofreadResult | null>(null);
 
   // Индекс раскрытой строки «Далее →» в подвале результатов (инлайн, без выпадающих окон)
   const [expandedHandoffIdx, setExpandedHandoffIdx] = useState<number | null>(null);
@@ -139,7 +175,7 @@ export default function App() {
       window.clearInterval(timer);
       setProgress(100);
       await new Promise((resolve) => setTimeout(resolve, 220));
-      setCompletedFiles((prev) => [result, ...prev]);
+      setCompletedFiles((prev) => [...prev, result]);
     } catch (err) {
       window.clearInterval(timer);
       setError(
@@ -162,6 +198,9 @@ export default function App() {
       }
       if (styleDocInputRef.current) {
         styleDocInputRef.current.value = '';
+      }
+      if (docWorkFileInputRef.current) {
+        docWorkFileInputRef.current.value = '';
       }
     }
   };
@@ -288,6 +327,152 @@ export default function App() {
     });
   };
 
+  // --- Обработчики пятого инструмента: [ 05 ] «Работа с документом» ---
+  const runDocWorkAsync = async (label: string, fn: () => Promise<void>) => {
+    setError(null);
+    setIsProcessing(true);
+    setCurrentFileName(label);
+    setProgress(22);
+
+    const timer = window.setInterval(() => {
+      setProgress((prev) => (prev < 86 ? prev + 12 : prev));
+    }, 150);
+
+    try {
+      await fn();
+      window.clearInterval(timer);
+      setProgress(100);
+      await new Promise((resolve) => setTimeout(resolve, 160));
+    } catch (err) {
+      window.clearInterval(timer);
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Не удалось выполнить операцию в модуле «Работа с документом».'
+      );
+    } finally {
+      setIsProcessing(false);
+      setProgress(0);
+      setCurrentFileName('');
+      if (docWorkFileInputRef.current) {
+        docWorkFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleDocWorkUploadFiles = async (files: File[]) => {
+    if (files.length === 0 || isProcessing) return;
+    const label =
+      files.length === 1
+        ? `Индексация: ${files[0].name}`
+        : `Индексация документов (${files.length} шт.)`;
+    await runDocWorkAsync(label, async () => {
+      const uploaded = await apiUploadDocumentWorkFiles(docWorkSessionIdRef.current, files);
+      setDocWorkSnapshot(uploaded.snapshot);
+      setActiveWorkspace('document_work');
+    });
+  };
+
+  const handleDocWorkMountDiskPath = async (diskPath: string) => {
+    const clean = diskPath.trim();
+    if (!clean || isProcessing) return;
+    await runDocWorkAsync(`Подключение с диска: ${clean}`, async () => {
+      const mounted = await apiMountDocumentWorkDiskPath(docWorkSessionIdRef.current, clean);
+      setDocWorkSnapshot(mounted.snapshot);
+      setActiveWorkspace('document_work');
+    });
+  };
+
+  const handleDocWorkRemoveSource = async (sourceId?: string) => {
+    if (isProcessing) return;
+    await runDocWorkAsync(sourceId ? 'Удаление документа' : 'Очистка сессии', async () => {
+      const updated = await apiRemoveDocumentWorkSource(docWorkSessionIdRef.current, sourceId);
+      setDocWorkSnapshot(updated.snapshot);
+      if (!sourceId) {
+        setDocWorkAnswers([]);
+      }
+    });
+  };
+
+  const handleDocWorkQuery = async (query: string, selectedSourceIds?: string[]) => {
+    const clean = query.trim();
+    if (!clean || isProcessing) return;
+    await runDocWorkAsync('Харнес документов — анализ', async () => {
+      const answer = await apiQueryDocumentWork(
+        docWorkSessionIdRef.current,
+        clean,
+        selectedSourceIds
+      );
+      setDocWorkSnapshot(answer.workspaceSnapshot);
+      setDocWorkAnswers((prev) => [...prev, answer]);
+      setActiveWorkspace('document_work');
+      if (answer.generatedDocument) {
+        setCompletedFiles((prev) => [...prev, answer.generatedDocument!]);
+      }
+    });
+  };
+
+  const handleDocWorkExportOffice = async (
+    answer: DocumentHarnessAnswer,
+    format: 'docx' | 'xlsx'
+  ) => {
+    if (isProcessing) return;
+    await runWithProgressBar(
+      `Сборка ${format.toUpperCase()} из выборки Харнеса`,
+      async () => {
+        const doc = await apiExportDocumentWorkOffice({
+          format,
+          title: answer.query,
+          answerText: answer.answerText,
+          citations: answer.citations,
+          entities: answer.entities,
+          tables: answer.tables,
+        });
+        return doc;
+      }
+    );
+  };
+
+  const handleSendDocWorkAnswerToBusinessStyle = async (text: string) => {
+    const clean = text.trim();
+    if (!clean || isProcessing) return;
+    setBusinessStyleInput(clean);
+    setFormalProofreadNote(null);
+
+    await runWithProgressBar('Работа с документом → Деловой стиль', async () => {
+      const transformed = await apiTransformBusinessStyleText(clean);
+      setBusinessStyleResult(transformed);
+      setBusinessStyleFormalDraft(transformed.formalText);
+      setActiveWorkspace('business_style');
+      return {
+        ...transformed.documentResult,
+        pipelineTrail: ['document_work', 'business_style'],
+      };
+    });
+  };
+
+  const handleDocWorkQuickCardSubmit = async () => {
+    const input = docWorkQuickInput.trim();
+    if (isProcessing || anyDictationActive) return;
+
+    if (!input) {
+      setActiveWorkspace('document_work');
+      return;
+    }
+
+    // Если введён чистый путь на диске без вопроса — подключаем папку/файл напрямую
+    const looksLikePurePath =
+      (/^[A-Za-z]:\\/.test(input) || /^\/[^\s]+$/.test(input)) &&
+      !/\s+(найди|покажи|извлек|сумм|дат|реквизит|сводк|оглавлен|таблиц|собери)/i.test(input);
+
+    setDocWorkQuickInput('');
+    if (looksLikePurePath) {
+      await handleDocWorkMountDiskPath(input);
+    } else {
+      await handleDocWorkQuery(input);
+    }
+  };
+
   // --- Сквозная передача результата любого инструмента в следующий инструмент ---
   const handleHandoffResult = async (
     item: DocumentProofreadResult,
@@ -308,6 +493,11 @@ export default function App() {
           pipelineTrail: [...prevTrail, 'proofread'],
         };
       });
+      return;
+    }
+
+    if (target === 'document_work') {
+      await handleDocWorkUploadFiles([fileForNextStep]);
       return;
     }
 
@@ -482,8 +672,14 @@ export default function App() {
     await runWithProgressBar('Скан_ведомости_ЗСПД.pdf', () => apiLoadSampleOcrPdf(ocrOutputFormat));
   };
 
+  const isToolsHome = activeWorkspace === 'tools';
+
   return (
-    <div className="min-h-dvh lg:h-dvh w-screen bg-[#f2efeb] text-[#1a1a1a] p-3 sm:p-5 lg:p-8 flex items-center justify-center overflow-y-auto lg:overflow-hidden">
+    <div
+      className={`min-h-dvh w-full bg-[#f2efeb] text-[#1a1a1a] p-3 sm:p-5 lg:p-8 flex flex-col items-center overflow-x-hidden ${
+        isToolsHome ? '' : 'lg:h-dvh lg:overflow-hidden'
+      }`}
+    >
       {/* Скрытый инпут выбора любого офисного файла (MS Office, LibreOffice, OpenOffice, МойОфис) */}
       <input
         ref={fileInputRef}
@@ -520,8 +716,29 @@ export default function App() {
         className="hidden"
       />
 
+      {/* Скрытый инпут множественной загрузки документов в модуль [ 05 ] «Работа с документом» */}
+      <input
+        ref={docWorkFileInputRef}
+        type="file"
+        multiple
+        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          if (files.length > 0) {
+            handleDocWorkUploadFiles(files);
+          }
+        }}
+        className="hidden"
+      />
+
       {/* Основной архитектурный фрейм — Корпоративный Архив (Variation 15) */}
-      <div className="w-full max-w-[1360px] lg:h-full lg:max-h-[820px] bg-white border border-[#1a1a1a] grid grid-rows-[auto_1fr_auto] relative shadow-[24px_24px_0px_rgba(0,0,0,0.05)] lg:shadow-[40px_40px_0px_rgba(0,0,0,0.05)] overflow-hidden">
+      <div
+        className={`w-full max-w-[1360px] my-auto bg-white border border-[#1a1a1a] relative shadow-[24px_24px_0px_rgba(0,0,0,0.05)] lg:shadow-[40px_40px_0px_rgba(0,0,0,0.05)] ${
+          isToolsHome
+            ? 'flex flex-col'
+            : 'lg:h-full lg:max-h-[880px] grid grid-rows-[auto_1fr_auto] overflow-hidden'
+        }`}
+      >
         {/* Тонкая диагональная линия в правом верхнем углу */}
         <div
           aria-hidden="true"
@@ -529,23 +746,23 @@ export default function App() {
         />
 
         {/* Шапка */}
-        <header className="relative z-10 px-6 py-4 sm:px-9 sm:py-6 border-b border-[#1a1a1a] flex items-center justify-between gap-4">
+        <header className="relative z-10 shrink-0 px-6 py-4 sm:px-9 sm:py-5 border-b border-[#1a1a1a] flex items-center justify-between gap-4">
           <button
             type="button"
             onClick={() => setActiveWorkspace('tools')}
             className="text-left cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#004ecc]"
           >
-            <h1 className="font-display text-2xl sm:text-[2.1rem] font-bold uppercase tracking-[0.05em] leading-none text-[#1a1a1a]">
+            <h1 className="font-display text-2xl sm:text-[2rem] font-bold uppercase tracking-[0.05em] leading-none text-[#1a1a1a]">
               Офисный Помощник
             </h1>
           </button>
           <div className="text-right font-mono text-[11px] leading-[1.45] uppercase tracking-[0.04em] text-[#1a1a1a]/60 shrink-0">
             <div>АВТОНОМНЫЙ КОНТУР</div>
-            <div>DOCX · PDF · WHISPER · СТИЛЬ</div>
+            <div>DOCX · PDF · WHISPER · СТИЛЬ · ХАРНЕС</div>
           </div>
         </header>
 
-        {/* Рабочая область: 4-колоночная сетка инструментов, расшифровка записи совещания или редактор «Деловой стиль» */}
+        {/* Рабочая область: сетка 3 сверху + 2 снизу либо полноэкранный модуль */}
         {activeWorkspace === 'business_style' ? (
           <main className="relative z-10 flex flex-col min-h-0">
             <BusinessStyleWorkspace
@@ -582,327 +799,436 @@ export default function App() {
               onBackToTools={() => setActiveWorkspace('tools')}
             />
           </main>
+        ) : activeWorkspace === 'document_work' ? (
+          <main className="relative z-10 flex flex-col min-h-0">
+            <DocumentWorkWorkspace
+              snapshot={docWorkSnapshot}
+              answers={docWorkAnswers}
+              isProcessing={isProcessing}
+              onUploadFiles={handleDocWorkUploadFiles}
+              onMountDiskPath={handleDocWorkMountDiskPath}
+              onRemoveSource={handleDocWorkRemoveSource}
+              onSubmitQuery={handleDocWorkQuery}
+              onExportOffice={handleDocWorkExportOffice}
+              onSendAnswerToBusinessStyle={handleSendDocWorkAnswerToBusinessStyle}
+              onBackToTools={() => setActiveWorkspace('tools')}
+            />
+          </main>
+        ) : activeWorkspace === 'proofread_summary' && selectedProofreadSummary ? (
+          <main className="relative z-10 flex flex-col min-h-0">
+            <ProofreadSummaryWorkspace
+              result={selectedProofreadSummary}
+              onBackToTools={() => setActiveWorkspace('tools')}
+            />
+          </main>
         ) : (
-          <main className="relative z-10 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 min-h-0">
-            {/* Колонка [ 01 ]: Исправить язык */}
-            <section className="p-6 xl:p-8 border-b md:border-r lg:border-b-0 border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
-              <div>
-                <div className="font-mono text-[13px] font-bold text-[#004ecc] mb-3 tracking-[0.02em]">
-                  [ 01 ]
+          <main className="relative z-10 flex flex-col shrink-0">
+            {/* Верхний ряд (3 зафиксированных инструмента): [ 01 ] Исправить язык · [ 02 ] Распознать текст · [ 03 ] Надиктовать голосом */}
+            <div className="grid grid-cols-1 md:grid-cols-3 border-b border-[#1a1a1a]/12 shrink-0">
+              {/* Колонка [ 01 ]: Исправить язык */}
+              <section className="p-5 xl:px-7 xl:py-6 md:min-h-[248px] border-b md:border-b-0 md:border-r border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
+                <div>
+                  <div className="font-mono text-[12px] font-bold text-[#004ecc] mb-2 tracking-[0.02em]">
+                    [ 01 ]
+                  </div>
+                  <h2 className="font-display text-[1.4rem] xl:text-[1.55rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2.5">
+                    Исправить язык
+                  </h2>
+                  <p className="text-[12.5px] leading-[1.52] text-[#555555]">
+                    Проверка орфографии и пунктуации для документов MS Office, LibreOffice и МойОфис с сохранением оформления и таблиц.
+                  </p>
+                  <div className="mt-2.5 font-mono text-[10px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
+                    DOCX · XLSX · PPTX · ODT · ODS · XODT · RTF
+                  </div>
                 </div>
-                <h2 className="font-display text-[1.5rem] xl:text-[1.65rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-3.5">
-                  Исправить язык
-                </h2>
-                <p className="text-[13px] leading-[1.58] text-[#555555]">
-                  Проверка орфографии и пунктуации для документов MS Office, LibreOffice и МойОфис с полным сохранением исходного оформления и таблиц.
-                </p>
-                <div className="mt-3.5 font-mono text-[10.5px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
-                  DOCX · XLSX · PPTX · ODT · ODS · ODP · XODT · RTF
-                </div>
-              </div>
 
-              <div className="pt-6">
-                <button
-                  type="button"
-                  disabled={isProcessing || anyDictationActive}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full py-3.5 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.95rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
-                >
-                  <span className="whitespace-nowrap">Выбрать файл</span>
-                  <ArrowUpRight className="w-4 h-4 shrink-0" />
-                </button>
-              </div>
-            </section>
-
-            {/* Колонка [ 02 ]: Распознать текст */}
-            <section className="p-6 xl:p-8 border-b lg:border-b-0 lg:border-r border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
-              <div>
-                <div className="font-mono text-[13px] font-bold text-[#004ecc] mb-3 tracking-[0.02em]">
-                  [ 02 ]
-                </div>
-                <h2 className="font-display text-[1.5rem] xl:text-[1.65rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-3.5">
-                  Распознать текст
-                </h2>
-                <p className="text-[13px] leading-[1.58] text-[#555555]">
-                  Точное локальное распознавание счетов, актов, таблиц и чертежей из PDF и сканов с переносом текста RU/EN и графики на исходные места.
-                </p>
-                <div className="mt-3.5 font-mono text-[10.5px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
-                  PDF · PNG · JPG · TIFF · BMP · WEBP
-                </div>
-              </div>
-
-              <div className="pt-6">
-                <div
-                  className="grid grid-cols-2 gap-1.5 mb-2.5"
-                  role="group"
-                  aria-label="Формат результата распознавания"
-                >
+                <div className="pt-4">
                   <button
                     type="button"
                     disabled={isProcessing || anyDictationActive}
-                    onClick={() => setOcrOutputFormat('docx')}
-                    className={`py-2 px-3 text-center font-mono text-[11px] font-bold uppercase tracking-[0.06em] border transition-colors cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc] ${
-                      ocrOutputFormat === 'docx'
-                        ? 'bg-[#1a1a1a] text-white border-[#1a1a1a]'
-                        : 'bg-transparent text-[#1a1a1a]/75 border-[#1a1a1a]/15 hover:border-[#1a1a1a] hover:text-[#1a1a1a]'
-                    }`}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full py-3 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.92rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
                   >
-                    DOCX
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isProcessing || anyDictationActive}
-                    onClick={() => setOcrOutputFormat('xlsx')}
-                    className={`py-2 px-3 text-center font-mono text-[11px] font-bold uppercase tracking-[0.06em] border transition-colors cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc] ${
-                      ocrOutputFormat === 'xlsx'
-                        ? 'bg-[#1a1a1a] text-white border-[#1a1a1a]'
-                        : 'bg-transparent text-[#1a1a1a]/75 border-[#1a1a1a]/15 hover:border-[#1a1a1a] hover:text-[#1a1a1a]'
-                    }`}
-                  >
-                    XLSX
+                    <span className="whitespace-nowrap">Выбрать файл</span>
+                    <ArrowUpRight className="w-4 h-4 shrink-0" />
                   </button>
                 </div>
+              </section>
 
-                <button
-                  type="button"
-                  disabled={isProcessing || anyDictationActive}
-                  onClick={() => ocrInputRef.current?.click()}
-                  className="w-full py-3.5 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.95rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
-                >
-                  <span className="whitespace-nowrap">Загрузить PDF</span>
-                  <ArrowUpRight className="w-4 h-4 shrink-0" />
-                </button>
-              </div>
-            </section>
-
-            {/* Колонка [ 03 ]: Надиктовать голосом + Загрузка записи совещания (аудио / видео) */}
-            <section className="p-6 xl:p-8 border-b md:border-b-0 md:border-r border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
-              <div>
-                <div className="flex items-center justify-between gap-2 mb-3">
-                  <span className="font-mono text-[13px] font-bold text-[#004ecc] tracking-[0.02em]">
-                    [ 03 ]
-                  </span>
-                  {meetingResult && (
-                    <button
-                      type="button"
-                      onClick={() => setActiveWorkspace('meeting_transcript')}
-                      title="Открыть последнюю расшифровку записи совещания"
-                      className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.05em] text-[#1a1a1a]/55 hover:text-[#004ecc] transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      <span>Текст</span>
-                      <Maximize2 className="w-3 h-3 shrink-0" />
-                    </button>
-                  )}
+              {/* Колонка [ 02 ]: Распознать текст */}
+              <section className="p-5 xl:px-7 xl:py-6 md:min-h-[248px] border-b md:border-b-0 md:border-r border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
+                <div>
+                  <div className="font-mono text-[12px] font-bold text-[#004ecc] mb-2 tracking-[0.02em]">
+                    [ 02 ]
+                  </div>
+                  <h2 className="font-display text-[1.4rem] xl:text-[1.55rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2.5">
+                    Распознать текст
+                  </h2>
+                  <p className="text-[12.5px] leading-[1.52] text-[#555555]">
+                    Локальное распознавание счетов, актов, таблиц и чертежей из PDF и сканов с переносом текста RU/EN и графики на исходные места.
+                  </p>
+                  <div className="mt-2.5 font-mono text-[10px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
+                    PDF · PNG · JPG · TIFF · BMP · WEBP
+                  </div>
                 </div>
-                <h2 className="font-display text-[1.5rem] xl:text-[1.65rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-3.5">
-                  Надиктовать голосом
-                </h2>
-                <p className="text-[13px] leading-[1.58] text-[#555555]">
-                  Локальный движок Whisper переводит голосовую диктовку, записи совещаний с диктофона и аудиодорожки из видео в структурированный текст и Word.
-                </p>
-                <div className="mt-3.5 font-mono text-[10.5px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
-                  МИКРОФОН · MP3 · WAV · M4A · OGG · MP4 · MKV · MOV
-                </div>
-              </div>
 
-              <div className="pt-6">
-                {dictationStatus === 'idle' ? (
-                  <div className="space-y-2.5">
+                <div className="pt-4">
+                  <div
+                    className="grid grid-cols-2 gap-1.5 mb-2"
+                    role="group"
+                    aria-label="Формат результата распознавания"
+                  >
                     <button
                       type="button"
-                      disabled={isProcessing || styleDictationStatus !== 'idle'}
-                      onClick={() => meetingMediaInputRef.current?.click()}
-                      className="w-full py-2.5 px-3 border border-[#1a1a1a]/20 hover:border-[#1a1a1a] bg-white text-[#1a1a1a] font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                      disabled={isProcessing || anyDictationActive}
+                      onClick={() => setOcrOutputFormat('docx')}
+                      className={`py-1.5 px-3 text-center font-mono text-[10.5px] font-bold uppercase tracking-[0.06em] border transition-colors cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc] ${
+                        ocrOutputFormat === 'docx'
+                          ? 'bg-[#1a1a1a] text-white border-[#1a1a1a]'
+                          : 'bg-transparent text-[#1a1a1a]/75 border-[#1a1a1a]/15 hover:border-[#1a1a1a] hover:text-[#1a1a1a]'
+                      }`}
                     >
-                      <Upload className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate">Загрузить запись совещания</span>
+                      DOCX
                     </button>
-
                     <button
                       type="button"
-                      disabled={isProcessing || styleDictationStatus !== 'idle'}
-                      onClick={handleStartDictation}
-                      className="w-full py-3.5 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.95rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                      disabled={isProcessing || anyDictationActive}
+                      onClick={() => setOcrOutputFormat('xlsx')}
+                      className={`py-1.5 px-3 text-center font-mono text-[10.5px] font-bold uppercase tracking-[0.06em] border transition-colors cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc] ${
+                        ocrOutputFormat === 'xlsx'
+                          ? 'bg-[#1a1a1a] text-white border-[#1a1a1a]'
+                          : 'bg-transparent text-[#1a1a1a]/75 border-[#1a1a1a]/15 hover:border-[#1a1a1a] hover:text-[#1a1a1a]'
+                      }`}
                     >
-                      <span className="whitespace-nowrap">Начать запись</span>
-                      <Mic className="w-4 h-4 shrink-0" />
+                      XLSX
                     </button>
                   </div>
-                ) : (
-                  <div className="border border-[#1a1a1a] bg-white p-3 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        {dictationStatus === 'recording' ? (
-                          <span className="relative flex h-2.5 w-2.5 shrink-0">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#dc2626] opacity-75" />
-                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#dc2626]" />
+
+                  <button
+                    type="button"
+                    disabled={isProcessing || anyDictationActive}
+                    onClick={() => ocrInputRef.current?.click()}
+                    className="w-full py-3 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.92rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                  >
+                    <span className="whitespace-nowrap">Загрузить PDF</span>
+                    <ArrowUpRight className="w-4 h-4 shrink-0" />
+                  </button>
+                </div>
+              </section>
+
+              {/* Колонка [ 03 ]: Надиктовать голосом + Загрузка записи совещания */}
+              <section className="p-5 xl:px-7 xl:py-6 md:min-h-[248px] flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="font-mono text-[12px] font-bold text-[#004ecc] tracking-[0.02em]">
+                      [ 03 ]
+                    </span>
+                    {meetingResult && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveWorkspace('meeting_transcript')}
+                        title="Открыть последнюю расшифровку записи совещания"
+                        className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.05em] text-[#1a1a1a]/55 hover:text-[#004ecc] transition-colors cursor-pointer whitespace-nowrap"
+                      >
+                        <span>Текст</span>
+                        <Maximize2 className="w-3 h-3 shrink-0" />
+                      </button>
+                    )}
+                  </div>
+                  <h2 className="font-display text-[1.4rem] xl:text-[1.55rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2.5">
+                    Надиктовать голосом
+                  </h2>
+                  <p className="text-[12.5px] leading-[1.52] text-[#555555]">
+                    Локальный Whisper переводит голосовую диктовку, записи совещаний с диктофона и аудиодорожки из видео в текст и Word.
+                  </p>
+                  <div className="mt-2.5 font-mono text-[10px] uppercase tracking-[0.04em] text-[#1a1a1a]/45">
+                    МИКРОФОН · MP3 · WAV · M4A · OGG · MP4 · MKV · MOV
+                  </div>
+                </div>
+
+                <div className="pt-4">
+                  {dictationStatus === 'idle' ? (
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        disabled={isProcessing || styleDictationStatus !== 'idle'}
+                        onClick={() => meetingMediaInputRef.current?.click()}
+                        className="w-full py-2 px-3 border border-[#1a1a1a]/20 hover:border-[#1a1a1a] bg-white text-[#1a1a1a] font-mono text-[10px] font-bold uppercase tracking-[0.05em] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                      >
+                        <Upload className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Загрузить запись совещания</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isProcessing || styleDictationStatus !== 'idle'}
+                        onClick={handleStartDictation}
+                        className="w-full py-3 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.92rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                      >
+                        <span className="whitespace-nowrap">Начать запись</span>
+                        <Mic className="w-4 h-4 shrink-0" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="border border-[#1a1a1a] bg-white p-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          {dictationStatus === 'recording' ? (
+                            <span className="relative flex h-2.5 w-2.5 shrink-0">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#dc2626] opacity-75" />
+                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#dc2626]" />
+                            </span>
+                          ) : (
+                            <span className="inline-flex rounded-full h-2.5 w-2.5 bg-[#d97706] shrink-0" />
+                          )}
+                          <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] text-[#1a1a1a] truncate">
+                            {dictationStatus === 'recording' ? 'Запись' : 'Пауза'}
                           </span>
-                        ) : (
-                          <span className="inline-flex rounded-full h-2.5 w-2.5 bg-[#d97706] shrink-0" />
-                        )}
-                        <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] text-[#1a1a1a] truncate">
-                          {dictationStatus === 'recording' ? 'Запись' : 'Пауза'}
+                        </div>
+                        <span className="font-mono text-[11.5px] font-bold tabular-nums text-[#1a1a1a]">
+                          {formatElapsedTimer(dictationElapsedSec)}
                         </span>
                       </div>
-                      <span className="font-mono text-[11.5px] font-bold tabular-nums text-[#1a1a1a]">
-                        {formatElapsedTimer(dictationElapsedSec)}
-                      </span>
-                    </div>
 
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={handleTogglePauseDictation}
-                        className="py-2 px-2 border border-[#1a1a1a] bg-white hover:bg-[#1a1a1a] hover:text-white text-[#1a1a1a] font-display text-[12px] font-medium uppercase tracking-[0.06em] transition-colors flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
-                      >
-                        {dictationStatus === 'recording' ? (
-                          <>
-                            <Pause className="w-3 h-3 shrink-0" />
-                            <span>Пауза</span>
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-3 h-3 shrink-0" />
-                            <span>Далее</span>
-                          </>
-                        )}
-                      </button>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleTogglePauseDictation}
+                          className="py-1.5 px-2 border border-[#1a1a1a] bg-white hover:bg-[#1a1a1a] hover:text-white text-[#1a1a1a] font-display text-[12px] font-medium uppercase tracking-[0.06em] transition-colors flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
+                        >
+                          {dictationStatus === 'recording' ? (
+                            <>
+                              <Pause className="w-3 h-3 shrink-0" />
+                              <span>Пауза</span>
+                            </>
+                          ) : (
+                            <>
+                              <Play className="w-3 h-3 shrink-0" />
+                              <span>Далее</span>
+                            </>
+                          )}
+                        </button>
 
-                      <button
-                        type="button"
-                        onClick={handleFinishDictation}
-                        className="py-2 px-2 bg-[#b91c1c] hover:bg-[#991b1b] text-white font-display text-[12px] font-medium uppercase tracking-[0.06em] transition-colors flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
-                      >
-                        <Square className="w-2.5 h-2.5 fill-current shrink-0" />
-                        <span>Готово</span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={handleFinishDictation}
+                          className="py-1.5 px-2 bg-[#b91c1c] hover:bg-[#991b1b] text-white font-display text-[12px] font-medium uppercase tracking-[0.06em] transition-colors flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
+                        >
+                          <Square className="w-2.5 h-2.5 fill-current shrink-0" />
+                          <span>Готово</span>
+                        </button>
+                      </div>
                     </div>
+                  )}
+                </div>
+              </section>
+            </div>
+
+            {/* Нижний ряд (2 зафиксированных широких инструмента): [ 04 ] Деловой стиль · [ 05 ] Работа с документом */}
+            <div className="grid grid-cols-1 md:grid-cols-2 shrink-0">
+              {/* Колонка [ 04 ]: Деловой стиль */}
+              <section className="p-5 xl:px-7 xl:py-6 md:min-h-[272px] border-b md:border-b-0 md:border-r border-[#1a1a1a]/10 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
+                <div className="flex flex-col">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="font-mono text-[12px] font-bold text-[#004ecc] tracking-[0.02em]">
+                      [ 04 ]
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveWorkspace('business_style')}
+                      title="Развернуть редактор делового стиля"
+                      className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.05em] text-[#1a1a1a]/55 hover:text-[#004ecc] transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <span>Редактор</span>
+                      <Maximize2 className="w-3 h-3 shrink-0" />
+                    </button>
                   </div>
-                )}
-              </div>
-            </section>
 
-            {/* Колонка [ 04 ]: Деловой стиль (комбинированный ввод: текст + диктовка в поле + мгновенная обработка документа) */}
-            <section className="p-6 xl:p-8 flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7] min-h-0">
-              <div className="flex flex-col flex-1 min-h-0">
-                <div className="flex items-center justify-between gap-2 mb-3">
-                  <span className="font-mono text-[13px] font-bold text-[#004ecc] tracking-[0.02em]">
-                    [ 04 ]
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveWorkspace('business_style')}
-                    title="Развернуть редактор делового стиля"
-                    className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.05em] text-[#1a1a1a]/55 hover:text-[#004ecc] transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    <span>Редактор</span>
-                    <Maximize2 className="w-3 h-3 shrink-0" />
-                  </button>
+                  <h2 className="font-display text-[1.4rem] xl:text-[1.55rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2">
+                    Деловой стиль
+                  </h2>
+
+                  <p className="text-[12.5px] leading-[1.48] text-[#555555] mb-2.5">
+                    Преобразование любого текста, диктовки или документа в вежливый официальный стиль для отправки.
+                  </p>
+
+                  <textarea
+                    value={businessStyleInput}
+                    onChange={(e) => setBusinessStyleInput(e.target.value)}
+                    placeholder="Напишите или вставьте текст, надиктуйте голосом либо загрузите документ..."
+                    className="h-[88px] min-h-[76px] max-h-[220px] w-full p-2.5 border border-[#1a1a1a]/20 focus:border-[#004ecc] focus:outline-none bg-white text-[12.5px] leading-[1.48] text-[#1a1a1a] placeholder:text-[#1a1a1a]/40 resize-y overflow-y-auto"
+                  />
                 </div>
 
-                <h2 className="font-display text-[1.5rem] xl:text-[1.65rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2.5">
-                  Деловой стиль
-                </h2>
+                <div className="pt-3 shrink-0">
+                  {styleDictationStatus === 'idle' ? (
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isProcessing || dictationStatus !== 'idle'}
+                        onClick={() => styleDocInputRef.current?.click()}
+                        className="py-2.5 px-2 text-center font-mono text-[10px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#1a1a1a] text-[#1a1a1a]/80 hover:text-[#1a1a1a] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
+                      >
+                        <FileUp className="w-3.5 h-3.5 shrink-0" />
+                        <span>Документ</span>
+                      </button>
 
-                <p className="text-[12.5px] leading-[1.5] text-[#555555] mb-3">
-                  Преобразование любого текста, диктовки или документа в вежливый официальный стиль для отправки.
-                </p>
+                      <button
+                        type="button"
+                        disabled={isProcessing || dictationStatus !== 'idle'}
+                        onClick={handleStartStyleDictation}
+                        className="py-2.5 px-2 text-center font-mono text-[10px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#004ecc] text-[#1a1a1a]/80 hover:text-[#004ecc] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
+                      >
+                        <Mic className="w-3.5 h-3.5 shrink-0" />
+                        <span>Диктовать</span>
+                      </button>
 
-                <textarea
-                  value={businessStyleInput}
-                  onChange={(e) => setBusinessStyleInput(e.target.value)}
-                  placeholder="Напишите или вставьте текст, надиктуйте голосом либо загрузите документ..."
-                  className="flex-1 min-h-[112px] w-full p-2.5 border border-[#1a1a1a]/20 focus:border-[#004ecc] focus:outline-none bg-white text-[12.5px] leading-[1.5] text-[#1a1a1a] placeholder:text-[#1a1a1a]/40 resize-none overflow-y-auto"
-                />
-              </div>
+                      <button
+                        type="button"
+                        disabled={
+                          isProcessing ||
+                          anyDictationActive ||
+                          (businessStyleInput.trim().length === 0 && !businessStyleResult)
+                        }
+                        onClick={() => {
+                          if (businessStyleInput.trim().length > 0) {
+                            handleTransformBusinessStyleText();
+                          } else {
+                            setActiveWorkspace('business_style');
+                          }
+                        }}
+                        className="py-2.5 px-3 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.9rem] font-medium uppercase tracking-[0.08em] transition-colors flex items-center justify-between gap-1.5 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                      >
+                        <span className="whitespace-nowrap truncate">Преобразовать</span>
+                        <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="border border-[#1a1a1a] bg-white px-2.5 py-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            styleDictationStatus === 'recording'
+                              ? 'bg-[#dc2626] animate-pulse'
+                              : 'bg-[#d97706]'
+                          }`}
+                        />
+                        <span className="font-mono text-[10.5px] font-bold tabular-nums text-[#1a1a1a]">
+                          {formatElapsedTimer(styleDictationElapsedSec)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={handleTogglePauseStyleDictation}
+                          aria-label={styleDictationStatus === 'recording' ? 'Пауза' : 'Продолжить'}
+                          className="p-1 border border-[#1a1a1a]/25 hover:bg-[#1a1a1a] hover:text-white cursor-pointer"
+                        >
+                          {styleDictationStatus === 'recording' ? (
+                            <Pause className="w-3 h-3" />
+                          ) : (
+                            <Play className="w-3 h-3" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStopStyleDictationToInput}
+                          className="px-2.5 py-1 bg-[#b91c1c] hover:bg-[#991b1b] text-white font-mono text-[10px] font-bold uppercase cursor-pointer whitespace-nowrap"
+                        >
+                          Вставить
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
 
-              <div className="pt-3 shrink-0">
-                {styleDictationStatus === 'idle' ? (
-                  <div className="grid grid-cols-2 gap-1.5 mb-2.5">
+              {/* Колонка [ 05 ]: Работа с документом (алгоритмический Харнес + прямой доступ к папкам на диске) */}
+              <section className="p-5 xl:px-7 xl:py-6 md:min-h-[272px] flex flex-col justify-between transition-colors duration-200 hover:bg-[#faf9f7]">
+                <div className="flex flex-col">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="font-mono text-[12px] font-bold text-[#004ecc] tracking-[0.02em]">
+                      [ 05 ]
+                    </span>
                     <button
                       type="button"
-                      disabled={isProcessing || dictationStatus !== 'idle'}
-                      onClick={() => styleDocInputRef.current?.click()}
-                      className="py-2 px-2 text-center font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#1a1a1a] text-[#1a1a1a]/80 hover:text-[#1a1a1a] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
+                      onClick={() => setActiveWorkspace('document_work')}
+                      title="Открыть рабочее пространство анализа документов"
+                      className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.05em] text-[#1a1a1a]/55 hover:text-[#004ecc] transition-colors cursor-pointer whitespace-nowrap tabular-nums"
+                    >
+                      <span>
+                        {docWorkSnapshot.sources.length > 0
+                          ? `Открыть (${docWorkSnapshot.sources.length})`
+                          : 'Открыть'}
+                      </span>
+                      <Maximize2 className="w-3 h-3 shrink-0" />
+                    </button>
+                  </div>
+
+                  <h2 className="font-display text-[1.4rem] xl:text-[1.55rem] font-bold uppercase leading-[1.1] tracking-[0.01em] text-[#1a1a1a] mb-2">
+                    Работа с документом
+                  </h2>
+
+                  <p className="text-[12.5px] leading-[1.48] text-[#555555] mb-2.5">
+                    Поиск со ссылками на страницы, суммы, даты, реквизиты, таблицы, оглавление и сборка Word/Excel по большим файлам и папкам на диске.
+                  </p>
+
+                  <textarea
+                    value={docWorkQuickInput}
+                    onChange={(e) => setDocWorkQuickInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleDocWorkQuickCardSubmit();
+                      }
+                    }}
+                    placeholder="Введите вопрос или путь к папке на диске (например: в папке D:\Договоры найди суммы и сроки)..."
+                    className="h-[88px] min-h-[76px] max-h-[220px] w-full p-2.5 border border-[#1a1a1a]/20 focus:border-[#004ecc] focus:outline-none bg-white text-[12.5px] leading-[1.48] text-[#1a1a1a] placeholder:text-[#1a1a1a]/40 resize-y overflow-y-auto"
+                  />
+                </div>
+
+                <div className="pt-3 shrink-0">
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isProcessing || anyDictationActive}
+                      onClick={() => docWorkFileInputRef.current?.click()}
+                      className="py-2.5 px-2 text-center font-mono text-[10px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#1a1a1a] text-[#1a1a1a]/80 hover:text-[#1a1a1a] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
                     >
                       <FileUp className="w-3.5 h-3.5 shrink-0" />
-                      <span>Документ</span>
+                      <span>Файлы</span>
                     </button>
 
                     <button
                       type="button"
-                      disabled={isProcessing || dictationStatus !== 'idle'}
-                      onClick={handleStartStyleDictation}
-                      className="py-2 px-2 text-center font-mono text-[10.5px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#004ecc] text-[#1a1a1a]/80 hover:text-[#004ecc] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
+                      disabled={isProcessing || anyDictationActive}
+                      onClick={() => setActiveWorkspace('document_work')}
+                      className="py-2.5 px-2 text-center font-mono text-[10px] font-bold uppercase tracking-[0.05em] border border-[#1a1a1a]/15 hover:border-[#004ecc] text-[#1a1a1a]/80 hover:text-[#004ecc] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap"
                     >
-                      <Mic className="w-3.5 h-3.5 shrink-0" />
-                      <span>Диктовать</span>
+                      <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+                      <span>Папка</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isProcessing || anyDictationActive}
+                      onClick={handleDocWorkQuickCardSubmit}
+                      className="py-2.5 px-3 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.9rem] font-medium uppercase tracking-[0.08em] transition-colors flex items-center justify-between gap-1.5 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
+                    >
+                      <span className="whitespace-nowrap truncate">
+                        {docWorkQuickInput.trim() ? 'Выполнить' : 'Открыть'}
+                      </span>
+                      <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
                     </button>
                   </div>
-                ) : (
-                  <div className="border border-[#1a1a1a] bg-white px-2.5 py-2 mb-2.5 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span
-                        className={`w-2 h-2 rounded-full shrink-0 ${
-                          styleDictationStatus === 'recording'
-                            ? 'bg-[#dc2626] animate-pulse'
-                            : 'bg-[#d97706]'
-                        }`}
-                      />
-                      <span className="font-mono text-[10.5px] font-bold tabular-nums text-[#1a1a1a]">
-                        {formatElapsedTimer(styleDictationElapsedSec)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={handleTogglePauseStyleDictation}
-                        aria-label={styleDictationStatus === 'recording' ? 'Пауза' : 'Продолжить'}
-                        className="p-1 border border-[#1a1a1a]/25 hover:bg-[#1a1a1a] hover:text-white cursor-pointer"
-                      >
-                        {styleDictationStatus === 'recording' ? (
-                          <Pause className="w-3 h-3" />
-                        ) : (
-                          <Play className="w-3 h-3" />
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleStopStyleDictationToInput}
-                        className="px-2 py-1 bg-[#b91c1c] hover:bg-[#991b1b] text-white font-mono text-[10px] font-bold uppercase cursor-pointer whitespace-nowrap"
-                      >
-                        Вставить
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  disabled={
-                    isProcessing ||
-                    anyDictationActive ||
-                    (businessStyleInput.trim().length === 0 && !businessStyleResult)
-                  }
-                  onClick={() => {
-                    if (businessStyleInput.trim().length > 0) {
-                      handleTransformBusinessStyleText();
-                    } else {
-                      setActiveWorkspace('business_style');
-                    }
-                  }}
-                  className="w-full py-3.5 px-4 bg-[#004ecc] hover:bg-[#003da1] active:bg-[#003182] disabled:opacity-45 disabled:pointer-events-none text-white font-display text-[0.95rem] font-medium uppercase tracking-[0.1em] transition-colors flex items-center justify-between gap-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#004ecc]"
-                >
-                  <span className="whitespace-nowrap">Преобразовать</span>
-                  <ArrowUpRight className="w-4 h-4 shrink-0" />
-                </button>
-              </div>
-            </section>
+                </div>
+              </section>
+            </div>
           </main>
         )}
 
         {/* Инвертированный подвал (статус, прогресс-бар, готовые файлы, DOC_TEST / PDF_TEST) */}
-        <footer className="relative z-10 bg-[#1a1a1a] text-white px-6 py-4 sm:px-9 sm:py-5">
+        <footer className="relative z-10 shrink-0 bg-[#1a1a1a] text-white px-6 py-4 sm:px-9 sm:py-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="flex-1 min-w-0">
               {isProcessing ? (
@@ -980,9 +1306,13 @@ export default function App() {
             </div>
           </div>
 
-          {/* Список готовых документов (ограничен по высоте, скролл только внутри списка) */}
+          {/* Список готовых документов: на главном экране растёт вниз вместе со страницей без зажима в мелкий бокс */}
           {completedFiles.length > 0 && (
-            <div className="mt-3.5 pt-3 border-t border-white/15 space-y-2 max-h-40 overflow-y-auto pr-1">
+            <div
+              className={`mt-3.5 pt-3 border-t border-white/15 space-y-2 ${
+                isToolsHome ? '' : 'max-h-40 overflow-y-auto pr-1'
+              }`}
+            >
               {completedFiles.map((item, idx) => {
                 const modeLabel =
                   item.operationMode === 'dictation'
@@ -993,7 +1323,9 @@ export default function App() {
                         ? 'Распознано (точная копия)'
                         : item.operationMode === 'business_style'
                           ? 'Деловой стиль'
-                          : 'Готовый файл';
+                          : item.operationMode === 'document_work'
+                            ? 'Работа с документом'
+                            : 'Готовый файл';
 
                 const chainTrail = formatPipelineTrail(item.pipelineTrail);
                 const nextSteps = getNextToolHandoffs(item);
@@ -1002,7 +1334,8 @@ export default function App() {
                 const downloadFileName =
                   item.operationMode === 'dictation' ||
                   item.operationMode === 'meeting_transcript' ||
-                  item.operationMode === 'business_style'
+                  item.operationMode === 'business_style' ||
+                  item.operationMode === 'document_work'
                     ? item.fileName
                     : `${item.operationMode === 'ocr' ? 'Распознано_' : 'Исправлено_'}${item.fileName}`;
 
@@ -1033,7 +1366,9 @@ export default function App() {
                               ? `Улучшений: ${item.totalIssuesFixed} · Готово к отправке`
                               : item.operationMode === 'meeting_transcript'
                                 ? `Фрагментов: ${item.totalChunksProcessed ?? item.totalSegments} · Word и TXT готовы`
-                                : `Чанков: ${item.totalChunksProcessed ?? item.totalSegments} · Исправлено: ${item.totalIssuesFixed}`}
+                                : item.operationMode === 'document_work'
+                                  ? `Сборка Харнеса · Блоков: ${item.totalSegments}`
+                                  : `Чанков: ${item.totalChunksProcessed ?? item.totalSegments} · Исправлено: ${item.totalIssuesFixed}`}
                         </div>
                       </div>
 
@@ -1054,11 +1389,27 @@ export default function App() {
                             {item.operationMode === 'ocr' ||
                             item.operationMode === 'dictation' ||
                             item.operationMode === 'meeting_transcript' ||
-                            item.operationMode === 'business_style'
+                            item.operationMode === 'business_style' ||
+                            item.operationMode === 'document_work'
                               ? `Скачать ${item.fileType === 'xlsx' ? 'XLSX' : 'DOCX'}`
                               : 'Скачать'}
                           </span>
                         </button>
+
+                        {(!item.operationMode || item.operationMode === 'proofread') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedProofreadSummary(item);
+                              setActiveWorkspace('proofread_summary');
+                            }}
+                            title="Открыть подробную таблицу всех исправлений (Было → Стало) для ручной перепроверки"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-white/30 hover:bg-white hover:text-[#1a1a1a] text-white font-mono text-[11px] uppercase tracking-[0.05em] transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            <ListChecks className="w-3.5 h-3.5 shrink-0" />
+                            <span>Сводка</span>
+                          </button>
+                        )}
 
                         {item.secondaryDownloadBase64 &&
                           item.secondaryFileName &&
@@ -1072,15 +1423,22 @@ export default function App() {
                                   item.secondaryMimeType!
                                 )
                               }
+                              title={
+                                !item.operationMode || item.operationMode === 'proofread'
+                                  ? `Скачать отдельный файл сводки исправлений (${item.secondaryFileName})`
+                                  : undefined
+                              }
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-white/30 hover:bg-white hover:text-[#1a1a1a] text-white font-mono text-[11px] uppercase tracking-[0.05em] transition-colors whitespace-nowrap cursor-pointer"
                             >
                               <Download className="w-3.5 h-3.5 shrink-0" />
                               <span>
-                                {secondaryIsTxt
-                                  ? 'TXT'
-                                  : item.fileType === 'xlsx'
-                                    ? 'DOCX'
-                                    : 'XLSX'}
+                                {!item.operationMode || item.operationMode === 'proofread'
+                                  ? 'Сводка DOCX'
+                                  : secondaryIsTxt
+                                    ? 'TXT'
+                                    : item.fileType === 'xlsx'
+                                      ? 'DOCX'
+                                      : 'XLSX'}
                               </span>
                             </button>
                           )}

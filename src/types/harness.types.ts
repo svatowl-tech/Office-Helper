@@ -52,7 +52,8 @@ export type ToolStageId =
   | 'ocr'
   | 'dictation'
   | 'meeting_transcript'
-  | 'business_style';
+  | 'business_style'
+  | 'document_work';
 
 export interface DocumentProofreadResult {
   fileName: string;
@@ -123,6 +124,94 @@ export interface MeetingTranscriptionResult {
   processingTimeMs: number;
   engineUsed: string;
   documentResult: DocumentProofreadResult;
+}
+
+export type DocumentSourceOrigin = 'session_upload' | 'disk_file' | 'disk_folder';
+
+export interface DocumentTocItem {
+  id: string;
+  title: string;
+  location: string;
+  pageNumber?: number;
+  level: number;
+  chunkIndex: number;
+}
+
+export interface DocumentSourceSummary {
+  id: string;
+  fileName: string;
+  origin: DocumentSourceOrigin;
+  diskPath?: string;
+  relativePath?: string;
+  extension: string;
+  sizeBytes: number;
+  pagesOrSheets: number;
+  chunksCount: number;
+  tablesCount: number;
+  usedOcr: boolean;
+  toc: DocumentTocItem[];
+  indexedAt: string;
+}
+
+export interface DocumentWorkspaceSnapshot {
+  sessionId: string;
+  sources: DocumentSourceSummary[];
+  diskMounts: string[];
+  totalChunks: number;
+  totalTables: number;
+  totalPagesOrSheets: number;
+}
+
+export type DocumentQueryIntent =
+  | 'search_qa'
+  | 'extract_entities'
+  | 'extract_tables'
+  | 'summarize_toc'
+  | 'build_docx'
+  | 'build_xlsx';
+
+export interface DocumentCitation {
+  sourceId: string;
+  fileName: string;
+  location: string;
+  sectionHeading?: string;
+  excerpt: string;
+  score: number;
+}
+
+export interface ExtractedEntityItem {
+  kind: 'amount' | 'date' | 'requisite' | 'document_ref';
+  label: string;
+  value: string;
+  fileName: string;
+  location: string;
+  context: string;
+}
+
+export interface ExtractedTableView {
+  sourceId: string;
+  fileName: string;
+  location: string;
+  headers: string[];
+  rows: string[][];
+  totalRowCount: number;
+}
+
+export interface DocumentHarnessAnswer {
+  id: string;
+  query: string;
+  intent: DocumentQueryIntent;
+  answerText: string;
+  citations: DocumentCitation[];
+  entities: ExtractedEntityItem[];
+  tables: ExtractedTableView[];
+  tocOverview?: Array<{ fileName: string; items: DocumentTocItem[] }>;
+  harnessSteps: string[];
+  engineUsed: string;
+  processingTimeMs: number;
+  generatedDocument?: DocumentProofreadResult;
+  autoMountedPath?: string;
+  workspaceSnapshot: DocumentWorkspaceSnapshot;
 }
 
 export interface LocalModelSpec {

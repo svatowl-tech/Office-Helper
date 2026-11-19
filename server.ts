@@ -50,7 +50,25 @@ import {
   processBusinessStyleDocument,
   transformToBusinessStyle,
 } from './server/services/businessStyle.service.ts';
-import { GithubBundleConfig, OcrOutputFormat } from './src/types/harness.types.ts';
+import {
+  addUploadedFileToSession,
+  buildWorkspaceSnapshot,
+  getOrCreateDocumentSession,
+  mountDiskPathToSession,
+  removeSourceOrClearSession,
+} from './server/services/documentHarnessIndex.service.ts';
+import {
+  buildOfficeDocumentFromHarnessResult,
+  executeDocumentHarnessQuery,
+} from './server/services/documentHarnessOrchestrator.service.ts';
+import { attachProofreadChangeSummary } from './server/services/proofreadSummaryReport.service.ts';
+import {
+  DocumentCitation,
+  ExtractedEntityItem,
+  ExtractedTableView,
+  GithubBundleConfig,
+  OcrOutputFormat,
+} from './src/types/harness.types.ts';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -148,37 +166,37 @@ async function startServer() {
 
       if (ext === '.docx') {
         const result = await processDocxBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.doc') {
         const result = await processLegacyDocBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.xlsx') {
         const result = await processXlsxBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.xls') {
         const result = await processLegacyXlsBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.pptx') {
         const result = await processPptxBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.ppt') {
         const result = await processLegacyPptBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
@@ -191,13 +209,13 @@ async function startServer() {
       ) {
         const odfExt = ext.slice(1) as OdfExtension;
         const result = await processOpenDocumentBuffer(file.buffer, originalName, odfExt);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
       if (ext === '.rtf') {
         const result = await processRtfBuffer(file.buffer, originalName);
-        res.json(result);
+        res.json(await attachProofreadChangeSummary(result));
         return;
       }
 
@@ -207,7 +225,7 @@ async function startServer() {
         const proofread = await proofreadRussianText(rawText);
         const outBuffer = Buffer.from(proofread.correctedText, 'utf8');
 
-        res.json({
+        const txtResult = await attachProofreadChangeSummary({
           fileName: originalName,
           fileType: 'txt',
           fileSizeBytes: outBuffer.length,
@@ -233,6 +251,7 @@ async function startServer() {
           downloadBase64: outBuffer.toString('base64'),
           mimeType: 'text/plain;charset=utf-8',
         });
+        res.json(txtResult);
         return;
       }
 
@@ -253,7 +272,9 @@ async function startServer() {
       const { type } = req.body as { type?: 'docx' | 'xlsx' };
       if (type === 'xlsx') {
         const sampleBuf = await generateSampleXlsxWithErrors();
-        const result = await processXlsxBuffer(sampleBuf, 'Ведомость_узлов_ЗСПД_образец.xlsx');
+        const result = await attachProofreadChangeSummary(
+          await processXlsxBuffer(sampleBuf, 'Ведомость_узлов_ЗСПД_образец.xlsx')
+        );
         res.json({
           ...result,
           originalSampleBase64: sampleBuf.toString('base64'),
@@ -262,7 +283,9 @@ async function startServer() {
       }
 
       const sampleBuf = await generateSampleDocxWithErrors();
-      const result = await processDocxBuffer(sampleBuf, 'Служебная_записка_АстраЛинукс_образец.docx');
+      const result = await attachProofreadChangeSummary(
+        await processDocxBuffer(sampleBuf, 'Служебная_записка_АстраЛинукс_образец.docx')
+      );
       res.json({
         ...result,
         originalSampleBase64: sampleBuf.toString('base64'),
@@ -524,6 +547,133 @@ async function startServer() {
     }
   });
 
+  // 8. Модуль [ 05 ] «Работа с документом»: алгоритмический Харнес для больших файлов и папок на диске
+  app.get('/api/doc-work/session/:sessionId', (req: Request, res: Response) => {
+    try {
+      const sessionId = String(req.params.sessionId || 'default');
+      const session = getOrCreateDocumentSession(sessionId);
+      res.json(buildWorkspaceSnapshot(session));
+    } catch (err) {
+      console.error('Ошибка чтения сессии работы с документом:', err);
+      res.status(500).json({ error: 'Не удалось получить состояние сессии документов.' });
+    }
+  });
+
+  app.post(
+    '/api/doc-work/upload',
+    upload.array('files', 20),
+    async (req: Request, res: Response) => {
+      try {
+        const files = (req.files as Express.Multer.File[]) || [];
+        const sessionId = String((req.body as { sessionId?: string })?.sessionId || 'default');
+        if (files.length === 0) {
+          res.status(400).json({ error: 'Выберите хотя бы один документ для индексации в сессии.' });
+          return;
+        }
+
+        const added = [];
+        for (const file of files) {
+          const decodedName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+          const summary = await addUploadedFileToSession(sessionId, file.buffer, decodedName);
+          added.push(summary);
+        }
+
+        const session = getOrCreateDocumentSession(sessionId);
+        res.json({
+          added,
+          snapshot: buildWorkspaceSnapshot(session),
+        });
+      } catch (err) {
+        console.error('Ошибка загрузки файлов в Харнес документов:', err);
+        const message =
+          err instanceof Error ? err.message : 'Не удалось проиндексировать загруженные документы.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.post('/api/doc-work/mount-disk', async (req: Request, res: Response) => {
+    try {
+      const { sessionId, diskPath } = req.body as { sessionId?: string; diskPath?: string };
+      if (typeof diskPath !== 'string' || !diskPath.trim()) {
+        res.status(400).json({ error: 'Укажите путь к локальной папке или файлу на диске.' });
+        return;
+      }
+
+      const result = await mountDiskPathToSession(sessionId || 'default', diskPath);
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка подключения пути на диске:', err);
+      const message =
+        err instanceof Error ? err.message : 'Не удалось подключить указанный путь на диске.';
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.delete('/api/doc-work/source', (req: Request, res: Response) => {
+    try {
+      const { sessionId, sourceId } = req.body as { sessionId?: string; sourceId?: string };
+      const snapshot = removeSourceOrClearSession(sessionId || 'default', sourceId);
+      res.json({ snapshot });
+    } catch (err) {
+      console.error('Ошибка удаления источника из сессии:', err);
+      res.status(500).json({ error: 'Не удалось обновить список документов сессии.' });
+    }
+  });
+
+  app.post('/api/doc-work/query', async (req: Request, res: Response) => {
+    try {
+      const { sessionId, query, selectedSourceIds } = req.body as {
+        sessionId?: string;
+        query?: string;
+        selectedSourceIds?: string[];
+      };
+      if (typeof query !== 'string' || !query.trim()) {
+        res.status(400).json({ error: 'Введите запрос или команду для анализа документов.' });
+        return;
+      }
+
+      const answer = await executeDocumentHarnessQuery({
+        sessionId: sessionId || 'default',
+        query,
+        selectedSourceIds: Array.isArray(selectedSourceIds) ? selectedSourceIds : undefined,
+      });
+      res.json(answer);
+    } catch (err) {
+      console.error('Ошибка выполнения запроса Харнеса документов:', err);
+      const message =
+        err instanceof Error ? err.message : 'Не удалось выполнить запрос по документам.';
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/api/doc-work/export', async (req: Request, res: Response) => {
+    try {
+      const { format, title, answerText, citations, entities, tables } = req.body as {
+        format?: 'docx' | 'xlsx';
+        title?: string;
+        answerText?: string;
+        citations?: DocumentCitation[];
+        entities?: ExtractedEntityItem[];
+        tables?: ExtractedTableView[];
+      };
+
+      const outFormat = format === 'xlsx' ? 'xlsx' : 'docx';
+      const result = await buildOfficeDocumentFromHarnessResult({
+        format: outFormat,
+        title: title || 'Выборка_документов',
+        answerText: answerText || '',
+        citations: Array.isArray(citations) ? citations : [],
+        entities: Array.isArray(entities) ? entities : [],
+        tables: Array.isArray(tables) ? tables : [],
+      });
+      res.json(result);
+    } catch (err) {
+      console.error('Ошибка экспорта сборки документов:', err);
+      res.status(500).json({ error: 'Не удалось собрать документ Word / Excel.' });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -695,21 +845,20 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     min-height: 100vh;
     padding: 24px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
     -webkit-font-smoothing: antialiased;
   }
   .container {
     width: 100%;
     max-width: 1200px;
-    min-height: 680px;
+    margin: auto 0;
     background: var(--paper);
     border: 1px solid var(--ink);
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto auto;
     position: relative;
     box-shadow: 32px 32px 0px rgba(0, 0, 0, 0.05);
-    overflow: hidden;
   }
   .diagonal-line {
     position: absolute;
@@ -745,20 +894,25 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     text-transform: uppercase;
   }
   main {
+    display: flex;
+    flex-direction: column;
+  }
+  .row-top {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
+    border-bottom: 1px solid var(--ink-faint);
   }
-  @media (max-width: 1080px) {
-    main { grid-template-columns: repeat(2, 1fr); }
-    .col { border-bottom: 1px solid var(--ink-faint); }
+  .row-bottom {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
   }
-  @media (max-width: 680px) {
-    main { grid-template-columns: 1fr; }
+  @media (max-width: 960px) {
+    .row-top, .row-bottom { grid-template-columns: 1fr; }
     .col { border-right: none !important; border-bottom: 1px solid var(--ink-faint); }
-    .col:last-child { border-bottom: none; }
+    .row-bottom .col:last-child { border-bottom: none; }
   }
   .col {
-    padding: 28px;
+    padding: 24px 28px;
     border-right: 1px solid var(--ink-faint);
     display: flex;
     flex-direction: column;
@@ -931,8 +1085,6 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     margin-top: 14px;
     padding-top: 12px;
     border-top: 1px solid rgba(255, 255, 255, 0.14);
-    max-height: 150px;
-    overflow-y: auto;
   }
   .file-row {
     display: flex;
@@ -972,14 +1124,16 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
     <input type="file" id="meetingMediaInput" accept=".mp3,.wav,.m4a,.aac,.ogg,.oga,.opus,.flac,.wma,.amr,.3gp,.aiff,.aif,.caf,.m4b,.mp4,.mkv,.mov,.avi,.webm,.wmv,.m4v,.flv,.mpeg,.mpg,.ts,.mts,audio/*,video/*" style="display:none" />
     <input type="file" id="styleDocInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt,.md,.pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp,.mp3,.wav,.m4a,.ogg,.mp4,.mkv,.mov,.webm" style="display:none" />
+    <input type="file" id="docWorkInput" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
     <header>
       <h1>Офисный Помощник</h1>
       <div class="doc-info">
         АВТОНОМНЫЙ КОНТУР<br>
-        DOCX · PDF · WHISPER · СТИЛЬ
+        DOCX · PDF · WHISPER · СТИЛЬ · ХАРНЕС
       </div>
     </header>
     <main>
+      <div class="row-top">
       <section class="col">
         <div>
           <div class="num">[ 01 ]</div>
@@ -1039,6 +1193,8 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
           </div>
         </div>
       </section>
+      </div>
+      <div class="row-bottom">
       <section class="col">
         <div>
           <div class="num">[ 04 ]</div>
@@ -1058,6 +1214,27 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
           </button>
         </div>
       </section>
+      <section class="col">
+        <div>
+          <div class="num">[ 05 ]</div>
+          <div class="sec-title">Работа с документом</div>
+          <p class="sec-desc">Алгоритмический Харнес для больших документов и папок на диске: поиск со ссылками на страницы, суммы, даты, реквизиты, таблицы, оглавление и сборка Word/Excel.</p>
+          <input id="docWorkDiskInput" type="text" class="style-textarea" style="min-height:36px;height:36px;resize:none;" placeholder="Путь к папке или файлу на диске (без копирования)..." />
+          <textarea id="docWorkQueryInput" class="style-textarea" style="min-height:60px;" placeholder="Вопрос по документам или команда (например: извлечь суммы и реквизиты, собрать в Excel)..."></textarea>
+          <div id="docWorkOutput" class="style-out"></div>
+        </div>
+        <div class="action-box">
+          <div class="style-tools">
+            <button type="button" class="fmt-opt" onclick="document.getElementById('docWorkInput').click()">ЗАГРУЗИТЬ ФАЙЛЫ</button>
+            <button type="button" class="fmt-opt" onclick="mountDocWorkDisk()">ПОДКЛЮЧИТЬ ПАПКУ</button>
+          </div>
+          <button class="main-btn" id="docWorkRunBtn" onclick="runDocWorkQuery()">
+            <span>Выполнить запрос</span>
+            <span>&#8599;</span>
+          </button>
+        </div>
+      </section>
+      </div>
     </main>
     <footer>
       <div class="footer-top">
@@ -1178,7 +1355,12 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
       const altBtn = document.createElement('button');
       altBtn.className = 'dl-btn alt';
       const isTxt = data.secondaryFileName.toLowerCase().endsWith('.txt');
-      altBtn.textContent = isTxt ? 'TXT' : (data.fileType === 'docx' ? 'XLSX' : 'DOCX');
+      const isProofreadSummary = !data.operationMode || data.operationMode === 'proofread';
+      altBtn.textContent = isProofreadSummary
+        ? 'Сводка DOCX'
+        : isTxt
+          ? 'TXT'
+          : (data.fileType === 'docx' ? 'XLSX' : 'DOCX');
       const altPrefix = data.operationMode === 'ocr' ? 'Распознано_' : '';
       altBtn.onclick = () => downloadBase64(data.secondaryDownloadBase64, altPrefix + data.secondaryFileName, data.secondaryMimeType);
       group.appendChild(altBtn);
@@ -1190,7 +1372,7 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     nextBtn.onclick = () => handoffStandaloneResult(data, nextTarget);
     group.appendChild(nextBtn);
     row.appendChild(group);
-    fileList.prepend(row);
+    fileList.appendChild(row);
   }
 
   async function sendFile(file, endpoint, extraFields) {
@@ -1447,6 +1629,64 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     }
     styleDocInput.value = '';
   });
+
+  const docWorkSessionId = 'standalone_' + Math.random().toString(36).slice(2, 10);
+  const docWorkInput = document.getElementById('docWorkInput');
+  const docWorkDiskInput = document.getElementById('docWorkDiskInput');
+  const docWorkQueryInput = document.getElementById('docWorkQueryInput');
+  const docWorkOutput = document.getElementById('docWorkOutput');
+
+  docWorkInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const fd = new FormData();
+    fd.append('sessionId', docWorkSessionId);
+    files.forEach((f) => fd.append('files', f));
+    try {
+      const res = await fetch('/api/doc-work/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      docWorkOutput.style.display = 'block';
+      docWorkOutput.textContent = res.ok
+        ? ('Проиндексировано файлов в сессии: ' + data.snapshot.sources.length)
+        : (data.error || 'Ошибка загрузки');
+    } catch (err) {}
+    docWorkInput.value = '';
+  });
+
+  async function mountDocWorkDisk() {
+    const diskPath = docWorkDiskInput.value.trim();
+    if (!diskPath) return;
+    try {
+      const res = await fetch('/api/doc-work/mount-disk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: docWorkSessionId, diskPath })
+      });
+      const data = await res.json();
+      docWorkOutput.style.display = 'block';
+      docWorkOutput.textContent = res.ok
+        ? ('Подключено с диска без копирования: ' + data.resolvedPath + ' (файлов в индексе: ' + data.snapshot.sources.length + ')')
+        : (data.error || 'Ошибка подключения пути');
+    } catch (e) {}
+  }
+
+  async function runDocWorkQuery() {
+    const query = docWorkQueryInput.value.trim();
+    if (!query) return;
+    try {
+      const res = await fetch('/api/doc-work/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: docWorkSessionId, query })
+      });
+      const data = await res.json();
+      docWorkOutput.style.display = 'block';
+      docWorkOutput.textContent = res.ok ? data.answerText : (data.error || 'Ошибка запроса');
+      if (res.ok && data.generatedDocument) {
+        renderResultRow(data.generatedDocument);
+      }
+    } catch (e) {}
+  }
 </script>
 </body>
 </html>`;
