@@ -71,11 +71,11 @@ const html = `<!DOCTYPE html>
   <header>Офисный помощник</header>
   <main>
     <div class="center-box">
-      <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.txt" style="display:none" />
+      <input type="file" id="fileInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt" style="display:none" />
       <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
       <button class="main-btn" onclick="document.getElementById('fileInput').click()">
         <span class="main-btn-title">Исправить русский язык</span>
-        <span class="main-btn-sub">Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)</span>
+        <span class="main-btn-sub">MS Office (.doc/.xls/.ppt/.docx/.xlsx/.pptx) · LibreOffice / МойОфис (.odt/.ods/.odp/.xodt/.xods/.rtf)</span>
       </button>
       <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
         <button class="main-btn ocr-btn" onclick="document.getElementById('ocrInput').click()">

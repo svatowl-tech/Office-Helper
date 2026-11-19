@@ -101,7 +101,9 @@ jobs:
           mkdir -p dist-airgap/bin/win7-x64
           mkdir -p dist-airgap/bin/win8plus-x64
           mkdir -p dist-airgap/models/sage-95m
+          mkdir -p dist-airgap/models/ocr
           mkdir -p dist-airgap/tessdata
+          mkdir -p dist-airgap/node_modules
 
       - name: "4. Компиляция НАТИВНЫХ лаунчеров (без зависимости от .bat, cmd.exe и .sh)"
         run: |
@@ -322,19 +324,29 @@ jobs:
 
           curl -L --retry 5 "https://nodejs.org/dist/v18.20.4/win-x64/node.exe" -o dist-airgap/bin/win7-x64/node.exe
 
-      - name: "9. Загрузка и включение в пакет локальных русских нейросетей (SAGE FRED-T5 + Qwen2.5-1.5B GGUF + Whisper ggml-base-q5_1.bin) и OCR словарей"
+      - name: "9. Загрузка и включение в пакет локальных моделей (SAGE FRED-T5 + Qwen2.5-1.5B GGUF + Whisper + RapidOCR ONNX + SLANet Table) и OCR словарей"
         run: |
           curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/config.json" -o dist-airgap/models/sage-95m/config.json
           curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/pytorch_model.bin" -o dist-airgap/models/sage-95m/pytorch_model.bin
           curl -L --retry 5 "https://huggingface.co/ai-forever/sage-fredt5-distilled-95m/resolve/main/tokenizer.json" -o dist-airgap/models/sage-95m/tokenizer.json
           curl -L --retry 5 "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" -o dist-airgap/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
           curl -L --retry 5 "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin" -o dist-airgap/models/ggml-base-q5_1.bin
+          curl -L --retry 5 "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" -o dist-airgap/models/ocr/ch_PP-OCRv4_det_infer.onnx
+          curl -L --retry 5 "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx" -o dist-airgap/models/ocr/ch_ppocr_mobile_v2.0_cls_train.onnx
+          curl -L --retry 5 "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/rec.onnx" -o dist-airgap/models/ocr/eslav_PP-OCRv5_rec.onnx
+          curl -L --retry 5 "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/dict.txt" -o dist-airgap/models/ocr/eslav_dict.txt
+          curl -L --retry 5 "https://github.com/RapidAI/RapidTable/releases/download/assets/en_ppstructure_mobile_v2_SLANet.onnx" -o dist-airgap/models/ocr/en_slanet.onnx
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata" -o dist-airgap/tessdata/rus.traineddata
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -o dist-airgap/tessdata/eng.traineddata
 
-      - name: "10. Формирование полностью автономного пакета (Нативный EXE/ELF, HTML без EXE, Скрипты, Win7 + Win8+)"
+      - name: "10. Формирование полностью автономного пакета (Нативный EXE/ELF, WASM OCR/PDF, HTML без EXE, Скрипты, Win7 + Win8+)"
         run: |
           cp -r dist dist-server Офисный-Помощник-Автономный.html start-astra-linux.sh start-windows7.bat README.md dist-airgap/
+          for pkg in mupdf onnxruntime-web onnxruntime-common tesseract.js tesseract.js-core wasm-feature-detect bmp-js idb-keyval is-url node-fetch regenerator-runtime zlibjs; do
+            if [ -d "node_modules/$pkg" ]; then
+              cp -r "node_modules/$pkg" dist-airgap/node_modules/
+            fi
+          done
           chmod +x dist-airgap/start-astra-linux.sh
           cd dist-airgap && zip -r9 ../office-assistant-ru-portable-airgap.zip . && cd ..
           tar -czf office-assistant-ru-astra-linux-portable.tar.gz -C dist-airgap .
@@ -358,12 +370,12 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v1.0.{0}', github.run_number) }}
           name: "Офисный помощник (Portable Air-Gap Release #${{ github.run_number }})"
           body: |
-            ### Полностью автономный пакет для Astra Linux 1.7.11 (усиленный, ядро 6.1, Core i3-9100), Windows 7 SP1 и Windows 8+ / 10 / 11
+            ### Полностью автономный портативный пакет (Windows 7 / 8 / 10 / 11 + Linux / Astra Linux)
             В состав релиза включены:
-            1. **`office-assistant-ru-portable-airgap.zip`** — полный портативный пакет с двумя версиями Windows-серверов и голосового движка Whisper (`bin/win8plus-x64/llama-server.exe` и `whisper-cli.exe` **без модификаций** + `bin/win7-x64/llama-server.exe` и `whisper-cli.exe` под Windows 7 SP1), двумя 100% статическими Linux-сборками (`bin/linux-x64-avx2/` под **Intel Core i3-9100** + универсальный `bin/linux-x64/` `SSE4.2`) и весами моделей (`qwen2.5-1.5b-instruct-q4_k_m.gguf`, `ggml-base-q5_1.bin`, `sage-95m`).
-            2. **`llama-server-win8plus-unmodified.exe`** и **`whisper-cli-win8plus-unmodified.exe`** — отдельные нативные сборки `llama.cpp` и `whisper.cpp` **без каких-либо модификаций исходного кода** (Windows 8+ / 10 / 11, MSVC static `/MT`).
-            3. **`llama-server-win7-patched.exe`** и **`whisper-cli-win7-patched.exe`** — отдельные сборки с поддержкой Windows 7 SP1.
-            4. **`Офисный-Помощник-Автономный.html`** — однофайловая браузерная версия.
+            1. **`office-assistant-ru-portable-airgap.zip`** — полный портативный пакет с поддержкой Windows 8+/10/11 (`bin/win8plus-x64/`) и Windows 7 SP1 (`bin/win7-x64/`), двумя статическими Linux-сборками (`bin/linux-x64-avx2/` для процессоров с AVX2 и универсальной `bin/linux-x64/` SSE4.2), голосовым движком Whisper и встроенными весами моделей.
+            2. **`office-assistant-ru-astra-linux-portable.tar.gz`** — тот же автономный пакет в формате `.tar.gz` для Linux и Astra Linux.
+            3. **`Офисный-Помощник-Автономный.html`** — однофайловая версия для запуска напрямую в браузере.
+            4. Отдельные исполняемые файлы **`llama-server`** и **`whisper-cli`** для Windows 8+ (без модификаций) и Windows 7 SP1.
           files: |
             office-assistant-ru-portable-airgap.zip
             office-assistant-ru-astra-linux-portable.tar.gz

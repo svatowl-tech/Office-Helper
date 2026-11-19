@@ -83,7 +83,7 @@ export default function App() {
       setError(
         err instanceof Error
           ? err.message
-          : 'Не удалось обработать файл. Проверьте формат (.docx, .xlsx, .pptx, .pdf, .png, .jpg).'
+          : 'Не удалось обработать файл. Проверьте формат (.doc, .docx, .xls, .xlsx, .ppt, .pptx, .odt, .ods, .odp, .xodt, .xods, .rtf, .pdf, .png, .jpg).'
       );
     } finally {
       setIsProcessing(false);
@@ -162,11 +162,11 @@ export default function App() {
 
   return (
     <div className="h-dvh w-screen overflow-hidden bg-slate-950 text-slate-100 flex flex-col justify-between select-none">
-      {/* Скрытый инпут выбора любого офисного файла (Word, Excel, PowerPoint) */}
+      {/* Скрытый инпут выбора любого офисного файла (MS Office, LibreOffice, OpenOffice, МойОфис) */}
       <input
         ref={fileInputRef}
         type="file"
-        accept=".docx,.xlsx,.pptx,.txt"
+        accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt"
         onChange={handleFileChange}
         className="hidden"
       />
@@ -203,7 +203,7 @@ export default function App() {
                 Исправить русский язык
               </span>
               <span className="text-xs font-normal text-sky-100/80">
-                Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)
+                Word · Excel · PowerPoint · LibreOffice / МойОфис (.odt, .ods, .odp, .xodt, .xods, .rtf)
               </span>
             </button>
 
@@ -413,7 +413,7 @@ export default function App() {
                   item.operationMode === 'dictation'
                     ? 'Надиктовано (Whisper) и исправлено'
                     : item.operationMode === 'ocr'
-                      ? 'Распознан и проверен'
+                      ? 'Распознано (точная копия)'
                       : 'Готовый файл';
 
                 const downloadFileName =
@@ -433,7 +433,9 @@ export default function App() {
                           {item.fileName}
                         </div>
                         <div className="text-xs text-slate-400 tabular-nums">
-                          {modeLabel} · Чанков: {item.totalChunksProcessed ?? item.totalSegments} · Исправлено ошибок: {item.totalIssuesFixed} · Оформление сохранено
+                          {item.operationMode === 'ocr'
+                            ? `${modeLabel} · Блоков: ${item.totalSegments} · Таблицы и графика сохранены`
+                            : `${modeLabel} · Чанков: ${item.totalChunksProcessed ?? item.totalSegments} · Исправлено ошибок: ${item.totalIssuesFixed} · Оформление сохранено`}
                         </div>
                       </div>
                     </div>

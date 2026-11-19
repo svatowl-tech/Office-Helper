@@ -49,7 +49,20 @@ export type OcrOutputFormat = 'docx' | 'xlsx';
 
 export interface DocumentProofreadResult {
   fileName: string;
-  fileType: 'docx' | 'xlsx' | 'pptx' | 'txt';
+  fileType:
+    | 'docx'
+    | 'xlsx'
+    | 'pptx'
+    | 'doc'
+    | 'xls'
+    | 'ppt'
+    | 'odt'
+    | 'ods'
+    | 'odp'
+    | 'xodt'
+    | 'xods'
+    | 'rtf'
+    | 'txt';
   fileSizeBytes: number;
   processingTimeMs: number;
   engineUsed: string;

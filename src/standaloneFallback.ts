@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import CFB from 'cfb';
 
 interface TextRule {
   pattern: RegExp;
@@ -400,6 +401,118 @@ async function processOfficeFileInBrowser(file: File): Promise<{
     };
   }
 
+  const cp1251High =
+    'ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—\u0098™љ›њќћџ\u00A0ЎўЈ¤Ґ¦§Ё©Є«¬\u00AD®Ї°±Ііґµ¶·ё№є»јЅѕї' +
+    'АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя';
+
+  const decodeCp1251Bytes = (arr: Uint8Array): string => {
+    let s = '';
+    for (let i = 0; i < arr.length; i++) {
+      s += arr[i] < 0x80 ? String.fromCharCode(arr[i]) : cp1251High[arr[i] - 0x80] || '';
+    }
+    return s;
+  };
+
+  if (lower.endsWith('.rtf')) {
+    const rawRtf = await file.text();
+    const plain = rawRtf
+      .replace(/\\par\b\s?/g, '\n')
+      .replace(/\\u(-?\d+)\??/g, (_m, c) => String.fromCharCode(Number(c) < 0 ? Number(c) + 65536 : Number(c)))
+      .replace(/\\'([0-9a-fA-F]{2})/g, (_m, hex) => decodeCp1251Bytes(Uint8Array.from([parseInt(hex, 16)])))
+      .replace(/\{\\(?:fonttbl|colortbl|stylesheet|info|\*)[^}]*\}/g, '')
+      .replace(/\\[a-zA-Z]+-?\d*\s?/g, '')
+      .replace(/[{}]/g, '');
+    const { text: fixed, fixes, chunks } = fixRussianText(plain);
+    const encodeRtf = (s: string) => {
+      let out = '';
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        const code = ch.charCodeAt(0);
+        if (ch === '\\' || ch === '{' || ch === '}') out += `\\${ch}`;
+        else if (code < 0x80) out += ch;
+        else {
+          const idx = cp1251High.indexOf(ch);
+          out += idx !== -1 ? `\\'${(0x80 + idx).toString(16).padStart(2, '0')}` : `\\u${code}?`;
+        }
+      }
+      return out;
+    };
+    const rtfBody = fixed
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => `\\pard\\f0\\fs24 ${encodeRtf(l)}\\par`)
+      .join('\n');
+    const outRtf = `{\\rtf1\\ansi\\ansicpg1251\\deff0{\\fonttbl{\\f0\\froman\\fcharset204 Times New Roman;}}\n${rtfBody}\n}`;
+    return {
+      fileName: file.name,
+      totalIssuesFixed: fixes,
+      totalChunksProcessed: chunks,
+      blob: new Blob([outRtf], { type: 'application/rtf' }),
+    };
+  }
+
+  if (lower.endsWith('.doc') || lower.endsWith('.xls') || lower.endsWith('.ppt')) {
+    const rawBytes = new Uint8Array(await file.arrayBuffer());
+    const decodeUtf16Le = (arr: Uint8Array): string => {
+      let s = '';
+      for (let i = 0; i + 1 < arr.length; i += 2) {
+        s += String.fromCharCode(arr[i] | (arr[i + 1] << 8));
+      }
+      return s;
+    };
+
+    const extractLinesFromStream = (bytes: Uint8Array): string[] => {
+      const utf16 = decodeUtf16Le(bytes);
+      const runs = utf16.match(/[А-Яа-яЁёA-Za-z0-9][А-Яа-яЁёA-Za-z0-9\s.,:;!?№"«»()\-–—]{4,}/g) || [];
+      const cleaned = runs.map((r) => r.replace(/\s+/g, ' ').trim()).filter((r) => /[А-Яа-яЁёA-Za-z]{2,}/.test(r));
+      if (cleaned.length > 0) return Array.from(new Set(cleaned));
+      const cp = decodeCp1251Bytes(bytes);
+      const cpRuns = cp.match(/[А-Яа-яЁё][А-Яа-яЁё0-9\s.,:;!?№"«»()\-–—]{4,}/g) || [];
+      return Array.from(new Set(cpRuns.map((r) => r.replace(/\s+/g, ' ').trim())));
+    };
+
+    let targetBytes = rawBytes;
+    try {
+      const cfb = CFB.read(rawBytes, { type: 'array' });
+      const streamName = lower.endsWith('.doc')
+        ? '/WordDocument'
+        : lower.endsWith('.xls')
+          ? '/Workbook'
+          : '/PowerPoint Document';
+      const entry = CFB.find(cfb, streamName);
+      if (entry && entry.content) {
+        targetBytes = new Uint8Array(entry.content);
+      }
+    } catch {
+      // RTF/HTML/plain fallback
+    }
+
+    const extractedLines = extractLinesFromStream(targetBytes);
+    const joinedText = extractedLines.join('\n') || decodeCp1251Bytes(rawBytes).slice(0, 4000);
+    const { text: fixedText, fixes, chunks } = fixRussianText(joinedText);
+    const fixedLines = fixedText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (lower.endsWith('.xls')) {
+      return {
+        fileName: file.name.replace(/\.xls$/i, '.xlsx'),
+        totalIssuesFixed: fixes,
+        totalChunksProcessed: chunks,
+        blob: await buildBrowserXlsxBlob(fixedLines),
+      };
+    }
+
+    return {
+      fileName: file.name.replace(/\.(doc|ppt)$/i, '.docx'),
+      totalIssuesFixed: fixes,
+      totalChunksProcessed: chunks,
+      blob: await buildBrowserDocxBlob(fixedLines),
+    };
+  }
+
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   let totalFixes = 0;
   let totalChunks = 0;
@@ -503,7 +616,104 @@ async function processOfficeFileInBrowser(file: File): Promise<{
     };
   }
 
-  throw new Error('Поддерживаются файлы .docx, .xlsx, .pptx и .txt');
+  if (
+    lower.endsWith('.odt') ||
+    lower.endsWith('.ods') ||
+    lower.endsWith('.odp') ||
+    lower.endsWith('.xodt') ||
+    lower.endsWith('.xods')
+  ) {
+    const isSheet = lower.endsWith('.ods') || lower.endsWith('.xods');
+    const mimeMap: Record<string, string> = {
+      '.odt': 'application/vnd.oasis.opendocument.text',
+      '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+      '.odp': 'application/vnd.oasis.opendocument.presentation',
+      '.xodt': 'application/vnd.oasis.opendocument.text',
+      '.xods': 'application/vnd.oasis.opendocument.spreadsheet',
+    };
+    const matchedExt = Object.keys(mimeMap).find((k) => lower.endsWith(k)) || '.odt';
+
+    const fixOdfParagraphXml = (xmlStr: string): string => {
+      const leafParaRx = /<text:(p|h)(?:\s[^>]*)?>(?:(?!<text:(?:p|h)(?:\s|>))[\s\S])*?<\/text:\1>/g;
+      return xmlStr.replace(leafParaRx, (elem) => {
+        const openEnd = elem.indexOf('>');
+        const closeStart = elem.lastIndexOf('</');
+        if (openEnd === -1 || closeStart <= openEnd) return elem;
+        const open = elem.slice(0, openEnd + 1);
+        const inner = elem.slice(openEnd + 1, closeStart);
+        const close = elem.slice(closeStart);
+        if (/<text:(?:p|h)(?:\s|>)/.test(inner)) return elem;
+
+        const updatedInner = inner.replace(/(^|>)([^<]+)(?=<|$)/g, (_m, lead, rawTxt) => {
+          const decoded = unescapeXml(rawTxt);
+          if (!decoded.trim()) return `${lead}${rawTxt}`;
+          const { text: fixed, fixes, chunks } = fixRussianText(decoded);
+          totalFixes += fixes;
+          totalChunks += chunks;
+          return `${lead}${escapeXml(fixed)}`;
+        });
+        return `${open}${updatedInner}${close}`;
+      });
+    };
+
+    const updatedMap = new Map<string, string>();
+    const contentFile = zip.file('content.xml');
+    if (contentFile) {
+      const rawContent = await contentFile.async('string');
+      if (isSheet) {
+        const updatedContent = rawContent.replace(
+          /<table:table-cell\b([^>]*)>([\s\S]*?)<\/table:table-cell>/g,
+          (fullCell, attrs) => {
+            if (/table:formula\s*=/.test(attrs) || !/office:value-type\s*=\s*"string"/.test(attrs)) {
+              return fullCell;
+            }
+            return fixOdfParagraphXml(fullCell);
+          }
+        );
+        updatedMap.set('content.xml', updatedContent);
+      } else {
+        updatedMap.set('content.xml', fixOdfParagraphXml(rawContent));
+      }
+    }
+
+    if (!isSheet) {
+      const stylesFile = zip.file('styles.xml');
+      if (stylesFile) {
+        updatedMap.set('styles.xml', fixOdfParagraphXml(await stylesFile.async('string')));
+      }
+    }
+
+    const outZip = new JSZip();
+    const mimeFile = zip.file('mimetype');
+    const mimeText = mimeFile ? (await mimeFile.async('string')).trim() : mimeMap[matchedExt];
+    outZip.file('mimetype', mimeText, { compression: 'STORE' });
+
+    for (const [entryPath, zipObj] of Object.entries(zip.files)) {
+      if (entryPath === 'mimetype') continue;
+      if (zipObj.dir) {
+        outZip.folder(entryPath);
+        continue;
+      }
+      const replaced = updatedMap.get(entryPath);
+      if (typeof replaced === 'string') {
+        outZip.file(entryPath, replaced, { compression: 'DEFLATE' });
+      } else {
+        outZip.file(entryPath, await zipObj.async('uint8array'), { compression: 'DEFLATE' });
+      }
+    }
+
+    return {
+      fileName: file.name,
+      totalIssuesFixed: totalFixes,
+      totalChunksProcessed: totalChunks,
+      blob: await outZip.generateAsync({
+        type: 'blob',
+        mimeType: mimeMap[matchedExt],
+      }),
+    };
+  }
+
+  throw new Error('Поддерживаются файлы .doc, .docx, .xls, .xlsx, .ppt, .pptx, .odt, .ods, .odp, .xodt, .xods, .rtf и .txt');
 }
 
 async function buildBrowserDocxBlob(lines: string[]): Promise<Blob> {

@@ -17,6 +17,16 @@ import {
   processXlsxBuffer,
 } from './server/services/documentProcessor.service.ts';
 import {
+  processLegacyDocBuffer,
+  processLegacyPptBuffer,
+  processLegacyXlsBuffer,
+} from './server/services/legacyOfficeConverter.service.ts';
+import {
+  OdfExtension,
+  processOpenDocumentBuffer,
+  processRtfBuffer,
+} from './server/services/openDocumentProcessor.service.ts';
+import {
   getLocalModelBenchmarks,
   getSystemAndNetworkTelemetry,
   probeTcpNode,
@@ -119,14 +129,51 @@ async function startServer() {
         return;
       }
 
+      if (ext === '.doc') {
+        const result = await processLegacyDocBuffer(file.buffer, originalName);
+        res.json(result);
+        return;
+      }
+
       if (ext === '.xlsx') {
         const result = await processXlsxBuffer(file.buffer, originalName);
         res.json(result);
         return;
       }
 
+      if (ext === '.xls') {
+        const result = await processLegacyXlsBuffer(file.buffer, originalName);
+        res.json(result);
+        return;
+      }
+
       if (ext === '.pptx') {
         const result = await processPptxBuffer(file.buffer, originalName);
+        res.json(result);
+        return;
+      }
+
+      if (ext === '.ppt') {
+        const result = await processLegacyPptBuffer(file.buffer, originalName);
+        res.json(result);
+        return;
+      }
+
+      if (
+        ext === '.odt' ||
+        ext === '.ods' ||
+        ext === '.odp' ||
+        ext === '.xodt' ||
+        ext === '.xods'
+      ) {
+        const odfExt = ext.slice(1) as OdfExtension;
+        const result = await processOpenDocumentBuffer(file.buffer, originalName, odfExt);
+        res.json(result);
+        return;
+      }
+
+      if (ext === '.rtf') {
+        const result = await processRtfBuffer(file.buffer, originalName);
         res.json(result);
         return;
       }
@@ -167,7 +214,7 @@ async function startServer() {
       }
 
       res.status(400).json({
-        error: `Формат "${ext}" требует конвертации или поддерживаются контейнеры .docx, .xlsx, .txt.`,
+        error: `Формат "${ext}" не поддерживается. Поддерживаются .doc, .docx, .xls, .xlsx, .ppt, .pptx, .odt, .ods, .odp, .xodt, .xods, .rtf и .txt.`,
       });
     } catch (err) {
       console.error('Ошибка обработки документа:', err);
@@ -231,7 +278,7 @@ async function startServer() {
     try {
       const rawFormat = String(req.body?.outputFormat || 'docx').toLowerCase();
       const outputFormat: OcrOutputFormat = rawFormat === 'xlsx' ? 'xlsx' : 'docx';
-      const pdfBuf = generateSamplePdfWithRussianTable();
+      const pdfBuf = await generateSamplePdfWithRussianTable();
       const result = await processPdfOrImageToOffice(
         pdfBuf,
         'Скан_ведомости_ЗСПД_образец.pdf',
@@ -541,11 +588,11 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
   <header>Офисный помощник</header>
   <main>
     <div class="center-box">
-      <input type="file" id="fileInput" accept=".docx,.xlsx,.pptx,.txt" style="display:none" />
+      <input type="file" id="fileInput" accept=".doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.xodt,.xods,.rtf,.txt" style="display:none" />
       <input type="file" id="ocrInput" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" style="display:none" />
       <button class="main-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()">
         <span class="main-btn-title">Исправить русский язык</span>
-        <span class="main-btn-sub">Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)</span>
+        <span class="main-btn-sub">Word/Excel/PPT (.doc/.xls/.ppt/.docx/.xlsx/.pptx) · LibreOffice/МойОфис (.odt/.ods/.odp/.xodt/.xods/.rtf)</span>
       </button>
       <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
         <button class="main-btn ocr-btn" id="ocrBtn" onclick="document.getElementById('ocrInput').click()">
@@ -619,7 +666,10 @@ const EMBEDDED_MINIMAL_HTML = `<!DOCTYPE html>
     const row = document.createElement('div');
     row.className = 'file-row';
     const chunksCount = data.totalChunksProcessed || data.totalSegments || 1;
-    row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено</div></div>';
+    const metaText = data.operationMode === 'ocr'
+      ? ('Распознано (точная копия) · Блоков: ' + (data.totalSegments || 1) + ' · Таблицы и графика сохранены')
+      : ('Готовый файл · Чанков: ' + chunksCount + ' · Исправлено ошибок: ' + data.totalIssuesFixed + ' · Оформление сохранено');
+    row.innerHTML = '<div><div class="file-name">' + data.fileName + '</div><div class="file-meta">' + metaText + '</div></div>';
     const group = document.createElement('div');
     group.className = 'btn-group';
     const btn = document.createElement('button');

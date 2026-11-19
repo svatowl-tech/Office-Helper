@@ -30,8 +30,13 @@ export function generateGithubWorkflowYaml(config: GithubBundleConfig): string {
           curl -L --retry 5 "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" -o dist-airgap/models/qwen2.5-1.5b-instruct-q4_k_m.gguf`;
 
   const ocrDownloadBlock = config.includeOcrTessdata
-    ? `# Предзагрузка оффлайн-словарей Tesseract OCR (Русский + Английский)
-          mkdir -p dist-airgap/tessdata
+    ? `# Предзагрузка локальных ONNX-моделей RapidOCR (PP-OCRv4 Det + PP-OCRv5 East-Slavic RU/EN + SLANet Table) и словарей Tesseract OCR
+          mkdir -p dist-airgap/models/ocr dist-airgap/tessdata
+          curl -L --retry 5 "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" -o dist-airgap/models/ocr/ch_PP-OCRv4_det_infer.onnx
+          curl -L --retry 5 "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_ppocr_mobile_v2.0_cls_train.onnx" -o dist-airgap/models/ocr/ch_ppocr_mobile_v2.0_cls_train.onnx
+          curl -L --retry 5 "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/rec.onnx" -o dist-airgap/models/ocr/eslav_PP-OCRv5_rec.onnx
+          curl -L --retry 5 "https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/dict.txt" -o dist-airgap/models/ocr/eslav_dict.txt
+          curl -L --retry 5 "https://github.com/RapidAI/RapidTable/releases/download/assets/en_ppstructure_mobile_v2_SLANet.onnx" -o dist-airgap/models/ocr/en_slanet.onnx
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/rus.traineddata" -o dist-airgap/tessdata/rus.traineddata
           curl -L --retry 5 "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" -o dist-airgap/tessdata/eng.traineddata`
     : '# Пропуск предзагрузки словарей OCR по выбору конфигурации';
@@ -192,7 +197,13 @@ jobs:
 
       - name: "9. Упаковка готового оффлайн-дистрибутива (Zero-Install Portable Archive)"
         run: |
+          mkdir -p dist-airgap/node_modules
           cp -r dist dist-server Офисный-Помощник-Автономный.html start-astra-linux.sh start-windows7.bat README.md dist-airgap/
+          for pkg in mupdf onnxruntime-web onnxruntime-common tesseract.js tesseract.js-core wasm-feature-detect bmp-js idb-keyval is-url node-fetch regenerator-runtime zlibjs; do
+            if [ -d "node_modules/$pkg" ]; then
+              cp -r "node_modules/$pkg" dist-airgap/node_modules/
+            fi
+          done
           chmod +x dist-airgap/start-astra-linux.sh
           cd dist-airgap && zip -r9 ../office-assistant-ru-portable-airgap.zip . && cd ..
 
